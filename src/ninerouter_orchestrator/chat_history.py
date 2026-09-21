@@ -1,0 +1,392 @@
+"""Read local chat stores without invoking tools or changing their history."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sqlite3
+from contextlib import closing
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import ClassVar
+
+from .paths import data_dir
+
+MAX_FILE = 32 * 1024 * 1024
+MAX_MESSAGES = 2000
+MAX_TEXT = 100_000
+
+
+def normalized(value: object) -> str:
+    if not isinstance(value, str) or not value or "\0" in value:
+        return ""
+    try:
+        path = Path(value).expanduser()
+        return str(path.resolve()) if path.is_absolute() else ""
+    except (OSError, ValueError, RuntimeError):
+        return ""
+
+
+def timestamp(value: object) -> str:
+    try:
+        if isinstance(value, (int, float)):
+            value = datetime.fromtimestamp(value / 1000 if value > 10**11 else value, UTC)
+        elif isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        else:
+            return ""
+        return value.replace(tzinfo=value.tzinfo or UTC).astimezone(UTC).isoformat()
+    except (ValueError, OverflowError, OSError):
+        return ""
+
+
+def text_content(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        # Deliberately exclude reasoning, tool output, images and instructions.
+        return "\n".join(
+            part["text"] for part in value if isinstance(part, dict)
+            and part.get("type") in {"text", "input_text", "output_text"}
+            and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
+def read_json(path: Path):
+    if path.stat().st_size > MAX_FILE:
+        raise ValueError("History file exceeds the read limit")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def json_lines(path: Path, *, head: bool = False):
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        budget = 512 * 1024 if head else MAX_FILE
+        consumed = 0
+        while consumed < budget:
+            line = stream.readline(min(2 * 1024 * 1024, budget - consumed))
+            if not line:
+                break
+            consumed += len(line.encode("utf-8"))
+            try:
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    yield value
+            except ValueError:
+                continue
+
+
+def readonly_db(path: Path):
+    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA query_only = ON")
+    return db
+
+
+@dataclass
+class HistoryEntry:
+    source: str
+    native_id: str
+    repository: str
+    title: str
+    updated_at: str
+    kind: str
+    path: Path
+    model: str = ""
+    archived: bool = False
+    extra: dict = field(default_factory=dict)
+
+    @property
+    def id(self) -> str:
+        key = f"{self.source}:{self.repository}:{self.native_id}"
+        return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+    def summary(self) -> dict:
+        return {
+            "id": self.id, "source": self.source, "title": self.title[:240],
+            "repository": self.repository, "updated_at": self.updated_at,
+            "model": self.model, "archived": self.archived,
+        }
+
+
+class ChatHistory:
+    SOURCES: ClassVar[dict[str, str]] = {
+        "switchyard": "Switchyard", "codex": "Codex", "claude-code": "Claude Code",
+        "opencode": "OpenCode / 9router", "gemini": "Gemini CLI", "qwen-code": "Qwen Code",
+        "cursor": "Cursor", "continue": "Continue",
+    }
+
+    def __init__(self, home: Path | None = None):
+        self.home = home or Path.home()
+        self.codex = Path(os.environ.get("CODEX_HOME", str(self.home / ".codex")))
+        self.claude = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(self.home / ".claude")))
+        self.data = Path(os.environ.get("XDG_DATA_HOME", str(self.home / ".local/share")))
+        self.switchyard_data = data_dir(self.home)
+
+    def scan(self, repository: Path) -> tuple[list[HistoryEntry], list[dict]]:
+        repository = repository.resolve()
+        entries = []
+        sources = []
+        readers = {
+            "switchyard": self._switchyard, "codex": self._codex,
+            "claude-code": self._claude, "opencode": self._opencode,
+            "gemini": lambda p: self._gemini(p, "gemini"),
+            "qwen-code": lambda p: self._gemini(p, "qwen-code"),
+            "cursor": self._cursor, "continue": self._continue,
+        }
+        for source, reader in readers.items():
+            found = []
+            warning = ""
+            try:
+                for entry in reader(repository):
+                    if normalized(entry.repository) == str(repository):
+                        found.append(entry)
+            except (OSError, ValueError, sqlite3.Error, KeyError, TypeError):
+                warning = "Some local history could not be read. Refresh after the tool finishes writing."
+            unique = {entry.id: entry for entry in found}
+            entries.extend(unique.values())
+            sources.append({
+                "id": source, "name": self.SOURCES[source], "count": len(unique),
+                "status": "partial" if warning else "ready" if unique else "empty",
+                "detail": warning or ("Local history connected." if unique else "No matching local history found."),
+            })
+        return sorted(entries, key=lambda e: (e.updated_at, e.id), reverse=True), sources
+
+    def _entry(self, source, path, repository, *, kind=None, title="", native_id="", updated=None, **kw):
+        return HistoryEntry(
+            source, native_id or str(path), str(repository), title or "Untitled conversation",
+            timestamp(updated) or timestamp(path.stat().st_mtime), kind or source, path, **kw,
+        )
+
+    def _codex(self, repository):
+        seen = set()
+        databases = sorted(self.codex.glob("state_*.sqlite"), reverse=True)
+        for path in databases[:1]:
+            try:
+                with closing(readonly_db(path)) as db:
+                    for raw in db.execute("SELECT * FROM threads"):
+                        row = dict(raw)
+                        if normalized(row.get("cwd")) != str(repository):
+                            continue
+                        seen.add(row["id"])
+                        yield self._entry(
+                            "codex", path, repository, kind="codex-db", native_id=row["id"],
+                            title=row.get("name") or row.get("title", ""),
+                            updated=row.get("updated_at_ms") or row.get("updated_at"),
+                            model=row.get("model") or row.get("model_provider", ""),
+                            archived=bool(row.get("archived")), extra={"rollout": row.get("rollout_path", "")},
+                        )
+            except sqlite3.Error:
+                pass  # Older CLIs may have only rollouts, or a different state schema.
+        for folder in ("sessions", "archived_sessions"):
+            for path in (self.codex / folder).glob("**/*.jsonl"):
+                meta = {}
+                title = ""
+                for record in json_lines(path, head=True):
+                    if record.get("type") == "session_meta":
+                        meta = record.get("payload", {})
+                        if meta.get("id") in seen or normalized(meta.get("cwd")) != str(repository):
+                            break
+                    if record.get("type") == "event_msg" and record.get("payload", {}).get("type") == "user_message":
+                        title = record["payload"].get("message", "")
+                        break
+                if normalized(meta.get("cwd")) == str(repository) and meta.get("id") not in seen:
+                    seen.add(meta.get("id"))
+                    yield self._entry("codex", path, repository, kind="codex-jsonl",
+                                      native_id=meta.get("id", str(path)), title=title,
+                                      model=meta.get("model_provider", ""), archived=folder == "archived_sessions")
+
+    def _claude(self, repository):
+        for path in (self.claude / "projects").glob("*/*.jsonl"):
+            for record in json_lines(path, head=True):
+                cwd = record.get("cwd")
+                if cwd and normalized(cwd) != str(repository):
+                    break
+                message = record.get("message", {})
+                if cwd and record.get("type") == "user" and isinstance(message, dict):
+                    title = text_content(message.get("content"))
+                    if title.strip():
+                        yield self._entry("claude-code", path, repository, title=title,
+                                          native_id=record.get("sessionId", str(path)))
+                        break
+
+    def _opencode(self, repository):
+        root = self.data / "opencode"
+        seen = set()
+        path = root / "opencode.db"
+        if path.is_file():
+            with closing(readonly_db(path)) as db:
+                for raw in db.execute("SELECT * FROM session"):
+                    row = dict(raw)
+                    if normalized(row.get("directory")) == str(repository):
+                        seen.add(row["id"])
+                        yield self._entry("opencode", path, repository, kind="opencode-db",
+                                          native_id=row["id"], title=row.get("title", ""),
+                                          updated=row.get("time_updated"))
+        for path in (root / "storage/session").glob("*/*.json"):
+            row = read_json(path)
+            if row.get("id") not in seen and normalized(row.get("directory")) == str(repository):
+                yield self._entry("opencode", path, repository, native_id=row["id"],
+                                  title=row.get("title", ""), updated=row.get("time", {}).get("updated"))
+
+    def _gemini(self, repository, source):
+        root = self.home / (".qwen" if source == "qwen-code" else ".gemini") / "tmp"
+        project_hash = hashlib.sha256(str(repository).encode()).hexdigest()
+        for path in (root / project_hash / "chats").glob("session-*.json"):
+            row = read_json(path)
+            if row.get("projectHash", project_hash) != project_hash:
+                continue
+            title = row.get("summary") or next((text_content(m.get("content"))
+                                                for m in row.get("messages", []) if m.get("type") == "user"), "")
+            yield self._entry(source, path, repository, kind="gemini", title=title,
+                              native_id=row.get("sessionId", str(path)), updated=row.get("lastUpdated"))
+
+    def _cursor(self, repository):
+        # Cursor encodes the absolute workspace directory in its project folder name.
+        encoded = re.sub(r"[^a-zA-Z0-9]", "-", str(repository)).lstrip("-")
+        root = self.home / ".cursor/projects" / encoded / "agent-transcripts"
+        for path in root.glob("**/*"):
+            if path.is_file() and path.suffix in {".txt", ".jsonl"}:
+                yield self._entry("cursor", path, repository, title=path.stem)
+
+    def _continue(self, repository):
+        for path in (self.home / ".continue/sessions").glob("*.json"):
+            row = read_json(path)
+            if isinstance(row, dict) and normalized(row.get("workspaceDirectory")) == str(repository):
+                yield self._entry("continue", path, repository, title=row.get("title", ""),
+                                  native_id=row.get("sessionId", str(path)))
+
+    def _switchyard(self, repository):
+        key = hashlib.sha256(str(repository).encode()).hexdigest()
+        for path in (self.switchyard_data / "chats" / key).glob("*.json"):
+            row = read_json(path)
+            if normalized(row.get("repository")) == str(repository):
+                yield self._entry("switchyard", path, repository, title=row.get("title", ""),
+                                  native_id=row.get("id", str(path)), updated=row.get("updated_at"),
+                                  model=row.get("tool", ""))
+
+    def save_exchange(self, repository: Path, session_id: str, user: str, reply: str, tool: str):
+        key = hashlib.sha256(str(repository).encode()).hexdigest()
+        path = self.switchyard_data / "chats" / key / f"{session_id}.json"
+        now = datetime.now(UTC).isoformat()
+        row = read_json(path) if path.exists() else {
+            "id": session_id, "repository": str(repository), "title": user[:240], "messages": [],
+        }
+        row.update(updated_at=now, tool=tool)
+        row["messages"].extend([
+            {"role": "user", "content": user, "timestamp": now},
+            {"role": "assistant", "content": reply, "timestamp": now, "label": tool},
+        ])
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            os.chmod(temporary, 0o600)
+            json.dump(row, stream, ensure_ascii=False)
+        temporary.replace(path)
+
+    def messages(self, entry: HistoryEntry) -> dict:
+        messages = []
+        truncated = False
+        total = 0
+        for raw in self._messages(entry):
+            if len(messages) >= MAX_MESSAGES or total >= 2_000_000:
+                truncated = True
+                break
+            role = raw.get("role")
+            content = text_content(raw.get("content"))
+            if role not in {"user", "assistant"} or not content.strip():
+                continue
+            if len(content) > MAX_TEXT:
+                truncated = True
+                content = content[:MAX_TEXT] + "\n[Message shortened for display]"
+            total += len(content)
+            messages.append({"role": role, "content": content,
+                             "timestamp": timestamp(raw.get("timestamp")),
+                             "label": raw.get("label") or self.SOURCES[entry.source]})
+        if entry.path.suffix in {".jsonl", ".txt"} and entry.path.stat().st_size > MAX_FILE:
+            truncated = True
+        return {**entry.summary(), "messages": messages, "truncated": truncated}
+
+    def _messages(self, entry):
+        if entry.kind == "codex-db":
+            for path in sorted(self.codex.glob("thread_history_*.sqlite"), reverse=True)[:1]:
+                found = False
+                with closing(readonly_db(path)) as db:
+                    for row in db.execute(
+                        "SELECT item_json, created_at_ms FROM thread_items WHERE thread_id = ? "
+                        "AND item_type IN ('userMessage', 'agentMessage') ORDER BY rollout_ordinal",
+                        (entry.native_id,),
+                    ):
+                        item = json.loads(row["item_json"])
+                        found = True
+                        yield {"role": "user" if item.get("type") == "userMessage" else "assistant",
+                               "content": item.get("content") or item.get("text", ""),
+                               "timestamp": row["created_at_ms"]}
+                if found:
+                    return
+            rollout = Path(entry.extra.get("rollout") or "/nonexistent")
+            if not rollout.resolve().is_relative_to(self.codex.resolve()):
+                raise ValueError("Invalid rollout location")
+            yield from self._codex_messages(rollout)
+        elif entry.kind == "codex-jsonl":
+            yield from self._codex_messages(entry.path)
+        elif entry.kind == "claude-code":
+            for row in json_lines(entry.path):
+                message = row.get("message")
+                if row.get("type") in {"user", "assistant"} and isinstance(message, dict):
+                    yield {"role": message.get("role"), "content": message.get("content"),
+                           "timestamp": row.get("timestamp"), "label": message.get("model")}
+        elif entry.kind in {"opencode", "opencode-db"}:
+            yield from self._opencode_messages(entry)
+        elif entry.kind == "gemini":
+            for row in read_json(entry.path).get("messages", []):
+                yield {"role": "assistant" if row.get("type") in {"gemini", "assistant"} else row.get("type"),
+                       "content": row.get("content"), "timestamp": row.get("timestamp"), "label": row.get("model")}
+        elif entry.kind == "switchyard":
+            yield from read_json(entry.path).get("messages", [])
+        elif entry.kind == "continue":
+            for row in read_json(entry.path).get("history", []):
+                if isinstance(row.get("message"), dict):
+                    yield row["message"]
+        elif entry.kind == "cursor":
+            if entry.path.suffix == ".jsonl":
+                for row in json_lines(entry.path):
+                    yield row.get("message", row)
+            else:
+                with entry.path.open(encoding="utf-8", errors="replace") as stream:
+                    content = stream.read(MAX_FILE)
+                sections = re.split(r"(?m)^(user|assistant):\s*\n", content)
+                for i in range(1, len(sections) - 1, 2):
+                    yield {"role": sections[i], "content": sections[i + 1]}
+
+    def _codex_messages(self, path):
+        # Event messages avoid displaying duplicated response items and injected system context.
+        for row in json_lines(path):
+            payload = row.get("payload", {})
+            if row.get("type") == "event_msg" and payload.get("type") in {"user_message", "agent_message"}:
+                yield {"role": "user" if payload["type"] == "user_message" else "assistant",
+                       "content": payload.get("message", ""), "timestamp": row.get("timestamp")}
+
+    def _opencode_messages(self, entry):
+        if entry.kind == "opencode-db":
+            with closing(readonly_db(entry.path)) as db:
+                for row in db.execute("SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id", (entry.native_id,)):
+                    message = json.loads(row["data"])
+                    parts = [json.loads(p[0]) for p in db.execute(
+                        "SELECT data FROM part WHERE message_id = ? ORDER BY id", (row["id"],))]
+                    yield {"role": message.get("role"), "content": parts,
+                           "timestamp": message.get("time", {}).get("created"), "label": message.get("modelID")}
+        else:
+            root = self.data / "opencode/storage"
+            if not re.fullmatch(r"[\w-]+", entry.native_id):
+                raise ValueError("Invalid session identifier")
+            rows = [read_json(path) for path in (root / "message" / entry.native_id).glob("*.json")]
+            for row in sorted(rows, key=lambda item: item.get("time", {}).get("created", 0)):
+                message_id = row.get("id", "")
+                if not re.fullmatch(r"[\w-]+", message_id):
+                    continue
+                parts = [read_json(p) for p in sorted((root / "part" / message_id).glob("*.json"))]
+                yield {"role": row.get("role"), "content": parts,
+                       "timestamp": row.get("time", {}).get("created"), "label": row.get("modelID")}

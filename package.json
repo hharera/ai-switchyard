@@ -1,0 +1,43 @@
+{
+  "name": "switchyard",
+  "version": "0.1.0",
+  "description": "Subscription-first engineering orchestration through stable 9router combos",
+  "type": "module",
+  "private": false,
+  "bin": {
+    "switchyard": "bin/switchyard.js"
+  },
+  "files": [
+    "bin",
+    "scripts/install-python.js",
+    "scripts/python-runtime.js",
+    "src/ninerouter_orchestrator/**/*.py",
+    "src/ninerouter_orchestrator/web_assets/*",
+    "pyproject.toml",
+    "README.md",
+    ".env.example",
+    "docker-compose.yml"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install-python.js",
+    "test": "node scripts/test.js",
+    "pack:check": "npm pack --dry-run",
+    "test:package": "node --test tests/npm.test.js tests/python-runtime.test.js",
+    "test:install": "node scripts/smoke-install.js",
+    "release:check": "node scripts/release-check.js",
+    "prepublishOnly": "npm run release:check && npm test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "os": ["win32", "darwin", "linux"],
+  "publishConfig": { "access": "public" },
+  "keywords": [
+    "9router",
+    "codex",
+    "opencode",
+    "orchestration",
+    "ai-agents"
+  ],
+  "license": "UNLICENSED"
+}

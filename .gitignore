@@ -1,0 +1,13 @@
+.env
+.venv/
+.switchyard-venv/
+node_modules/
+*.tgz
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.orchestrator/
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#fdfaf6">
+    <title>9router Switchyard</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/assets/styles.css">
+    <link rel="stylesheet" href="/assets/chat.css">
+  </head>
+  <body>
+    <div class="page-grid" aria-hidden="true"></div>
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="sidebar-logo" href="#overview"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>9Router <small>Switchyard</small></span></a>
+      <p class="sidebar-label">Workspace</p>
+      <nav class="side-nav">
+        <a href="#overview" data-panel="overview" aria-current="page">Overview</a>
+        <a href="#workspaces" data-panel="workspaces">Workspaces</a>
+        <a href="#dispatch" data-panel="dispatch">Dispatch</a>
+        <a href="#chat" data-panel="chat">Chat</a>
+        <a href="#commands" data-panel="commands">CMD <span id="command-nav-count" class="nav-live-count" hidden></span></a>
+        <a href="#git" data-panel="git">Git</a>
+        <a href="#steps" data-panel="steps">Steps</a>
+        <a href="#workflows" data-panel="workflows">Workflows</a>
+        <a href="#mcps" data-panel="mcps">MCPs</a>
+        <a href="#clis" data-panel="clis">CLIs</a>
+        <a href="#delivery" data-panel="delivery">Delivery</a>
+        <a href="#runs" data-panel="runs">Runs</a>
+        <a href="#system" data-panel="system">System</a>
+      </nav>
+      <div class="sidebar-footer"><b>Local workspace</b><span>9router execution routes</span><small>Switchyard / v0.1</small></div>
+    </aside>
+    <main id="workspace" data-view="overview">
+      <div class="workspace-heading"><p class="eyebrow">Engineering operations</p><h1 id="view-title" tabindex="-1">Overview</h1><p id="view-description">Dispatch work, configure routes, and inspect results.</p></div>
+      <div class="workspace-context">
+        <div class="step-field"><label for="active-workspace">Active workspace</label><select id="active-workspace" data-workspace-selector disabled><option value="">Loading workspaces</option></select></div>
+        <p id="active-workspace-path" class="field-note" role="status"></p>
+        <a href="#workspaces">Manage workspaces</a>
+      </div>
+      <section id="workspaces-panel" class="workspaces-panel" aria-label="Saved workspaces" hidden>
+        <div class="workflow-heading"><div><p class="eyebrow">Repository configuration</p><h2>Saved workspaces</h2><p>Save a repository once. Dispatch, Git, and Runs share the active workspace. Workflow templates, MCPs, and CLIs remain global.</p></div><button class="secondary-button" id="new-workspace" type="button">Add workspace</button></div>
+        <div class="workspace-manager">
+          <section id="workspace-list" class="workspace-list" aria-label="Configured workspaces"></section>
+          <form id="workspace-form">
+            <h3 id="workspace-editor-title">Add workspace</h3>
+            <div class="workspace-fields">
+              <div class="step-field"><label for="workspace-name">Name</label><input id="workspace-name" required maxlength="80" autocomplete="off"></div>
+              <div class="step-field workspace-wide"><label for="workspace-repository">Repository path</label><div class="repository-controls"><input id="workspace-repository" required autocomplete="off" list="workspace-recent-paths" placeholder="/path/to/repository"><button class="secondary-button" id="browse-workspace" type="button">Browse folders</button></div><datalist id="workspace-recent-paths"></datalist><p class="field-note">Choose a local folder. If it is not a Git repository, Git is initialized when you save. Previously used paths appear as suggestions.</p></div>
+              <div class="step-field"><label for="workspace-workflow">Default workflow (optional)</label><select id="workspace-workflow"></select></div>
+              <div class="step-field"><label for="workspace-forks">Attempts per ticket</label><input id="workspace-forks" type="number" min="1" max="5" value="3" required></div>
+              <div class="step-field"><label for="workspace-timeout">Command timeout (seconds)</label><input id="workspace-timeout" type="number" min="30" max="7200" value="1800" required></div>
+              <div class="step-field"><label for="workspace-git-base">Git comparison base</label><input id="workspace-git-base" value="main" required maxlength="240"></div>
+            </div>
+            <fieldset><legend>Delivery after a successful run</legend><div class="delivery-mode" data-delivery-mode="workspace"></div><div class="delivery-fields" data-delivery-fields="workspace"></div><button class="secondary-button" id="copy-workspace-delivery" type="button">Copy global delivery defaults</button></fieldset>
+            <p class="field-note">These are defaults, not permission to execute. Every workflow run still requires host-command confirmation.</p>
+            <label class="mcp-enabled"><input id="workspace-default" type="checkbox">Use as the default workspace</label>
+            <div class="form-error" id="workspace-error" role="alert"></div><p id="workspace-status" class="field-note" role="status"></p>
+            <div class="workspace-actions"><button class="dispatch-button compact-button" id="save-workspace" type="submit" disabled>Save workspace</button><button class="secondary-button" id="cancel-workspace" type="button">Cancel edits</button><button class="secondary-button danger-button" id="remove-workspace" type="button" hidden>Remove workspace</button></div>
+          </form>
+        </div>
+      </section>
+      <dialog id="folder-browser" class="folder-browser" aria-labelledby="folder-browser-title" aria-describedby="folder-browser-note">
+        <h2 id="folder-browser-title">Choose repository folder</h2>
+        <p id="folder-browser-note" class="field-note">Browse folders on the machine running Switchyard. Selecting a folder does not save the workspace.</p>
+        <form id="folder-browser-form" class="step-field">
+          <label for="folder-browser-path">Folder path</label>
+          <div class="repository-controls"><input id="folder-browser-path" autocomplete="off" aria-describedby="folder-browser-error" autofocus><button class="secondary-button" type="submit">Open folder</button></div>
+        </form>
+        <div class="workspace-actions"><button id="folder-browser-home" class="secondary-button" type="button">Home</button><button id="folder-browser-up" class="secondary-button" type="button" disabled>Parent folder</button></div>
+        <div class="step-field folder-browser-search">
+          <label for="folder-browser-search">Search subfolders</label>
+          <div class="repository-controls"><input id="folder-browser-search" type="search" placeholder="Filter by folder name" autocomplete="off" spellcheck="false" aria-controls="folder-browser-list" aria-describedby="folder-browser-search-note" disabled><button id="folder-browser-clear-search" class="secondary-button" type="button" disabled>Clear search</button></div>
+          <p id="folder-browser-search-note" class="field-note">Searches only the subfolders in the current folder.</p>
+        </div>
+        <p id="folder-browser-status" class="field-note" role="status"></p>
+        <p id="folder-browser-error" class="form-error" role="alert"></p>
+        <div id="folder-browser-list" class="folder-browser-list" role="region" aria-label="Folders"></div>
+        <div class="workspace-actions"><button id="folder-browser-select" class="secondary-button" type="button" disabled>Use this folder</button><button id="folder-browser-cancel" class="secondary-button" type="button">Cancel</button></div>
+      </dialog>
+      <section id="chat-panel" class="chat-panel" aria-labelledby="chat-heading" hidden>
+        <header class="chat-heading">
+          <div class="chat-heading-title">
+            <h2 id="chat-heading" tabindex="-1">Workspace chats</h2>
+            <span class="chat-header-divider" aria-hidden="true">/</span>
+            <label class="chat-sr-only" for="chat-workspace">Active workspace</label>
+            <select id="chat-workspace" data-workspace-selector disabled><option value="">Loading workspaces</option></select>
+          </div>
+          <button class="chat-new-button" id="chat-new" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button>
+        </header>
+        <div class="chat-shell">
+          <aside class="chat-history" aria-labelledby="chat-history-heading">
+            <div class="chat-history-heading"><h3 id="chat-history-heading">Chat history</h3><button id="chat-history-refresh" class="chat-new-button" type="button">Refresh</button></div>
+            <p id="chat-history-path" class="chat-history-path"></p>
+            <label for="chat-history-search">Search conversations</label>
+            <input id="chat-history-search" type="search" placeholder="Title or model" autocomplete="off">
+            <label for="chat-history-source">AI tool</label>
+            <select id="chat-history-source"><option value="">All tools</option></select>
+            <p id="chat-history-status" role="status" aria-live="polite"></p>
+            <p id="chat-history-error" role="alert"></p>
+            <ol id="chat-history-list" aria-label="Workspace conversations"></ol>
+            <button id="chat-history-clear" class="chat-new-button" type="button" hidden>Clear filters</button>
+            <details class="chat-history-coverage"><summary>History sources</summary><p>Only local histories linked to this exact workspace path are shown. Cloud-only chats and tools without a history adapter are not included.</p><ul id="chat-history-sources"></ul></details>
+          </aside>
+          <div class="chat-conversation">
+            <div id="chat-history-detail" class="chat-history-detail" hidden>
+              <button id="chat-history-back" class="chat-new-button" type="button">Back to history</button>
+              <h3 id="chat-history-title" tabindex="-1"></h3>
+              <p id="chat-history-meta"></p>
+              <p id="chat-history-detail-status" role="status" aria-live="polite"></p>
+            </div>
+            <ol id="chat-messages" class="chat-messages" aria-label="Conversation"></ol>
+            <div id="chat-empty" class="chat-empty">
+              <div class="chat-code-mark" aria-hidden="true"><svg viewBox="0 0 40 40"><path d="m13 12-8 8 8 8m14-16 8 8-8 8M23 7l-6 26"/></svg></div>
+              <h3>Ask your codebase</h3>
+              <p>Understand a flow, find a file, or explore an idea.</p>
+              <a class="chat-repository" href="#workspaces"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v12H3Z"/></svg><span id="chat-workspace-name">No workspace selected</span></a>
+              <div class="chat-suggestions" role="group" aria-label="Example questions">
+                <button type="button" data-chat-suggestion="Explain the architecture of this repository and identify the main entry points."><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>Explain the architecture</button>
+                <button type="button" data-chat-suggestion="Where is workflow execution implemented, and how does data move through it?"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10m12-9a7 7 0 0 1-7 7H6"/></svg>Trace a workflow</button>
+                <button type="button" data-chat-suggestion="Which tests are most relevant to the current workspace, and what do they cover?"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 12 3 3 5-6M5 3h14v18H5Z"/></svg>Find relevant tests</button>
+              </div>
+            </div>
+            <form id="chat-form" class="chat-composer">
+              <label class="chat-sr-only" for="chat-input">Message</label>
+              <textarea id="chat-input" rows="3" required maxlength="12000" placeholder="Ask anything about this repository..." aria-describedby="chat-shortcut chat-error"></textarea>
+              <div class="chat-composer-footer">
+                <div class="chat-tool-controls">
+                  <label class="chat-sr-only" for="chat-tool">AI tool</label>
+                  <select id="chat-tool" aria-describedby="chat-tool-note"><option value="">Loading tools</option></select>
+                  <button class="chat-icon-button" id="chat-refresh-tools" type="button" aria-label="Refresh tools" title="Refresh tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1"/></svg></button>
+                </div>
+                <span class="chat-readonly"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>Read-only</span>
+                <button class="chat-send-button" id="chat-send" type="submit" title="Send message"><span class="chat-sr-only">Send message</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+              </div>
+              <div class="chat-feedback"><p id="chat-status" role="status" aria-live="polite"></p><p id="chat-error" role="alert"></p></div>
+            </form>
+            <div class="chat-session-footer">
+              <p id="chat-shortcut">Ctrl / Command + Enter to send</p>
+              <details class="chat-session-details">
+                <summary>Session &amp; privacy</summary>
+                <div class="chat-session-info">
+                  <b>Read-only session</b>
+                  <p>Chat can read files, but cannot edit them, run mutating commands, or call configured MCPs.</p>
+                  <p>Completed Switchyard exchanges are saved locally. Imported history is read-only and is never included in new chats. Up to 10 recent exchanges and inspected files from the current chat are sent through the selected tool to its AI provider. Switching tools shares that context with the new provider.</p>
+                  <p id="chat-tool-note">Each reply uses the tool selected when you send the message.</p>
+                  <b>Active workspace</b>
+                  <p id="chat-workspace-path">Add or select a workspace to start chatting.</p>
+                  <a href="#workspaces">Manage workspaces</a>
+                </div>
+              </details>
+            </div>
+            <p class="chat-boundary-note">Chats are saved locally. Context is shared with the selected AI provider.</p>
+          </div>
+        </div>
+      </section>
+      <section id="commands-panel" class="commands-panel" aria-labelledby="commands-heading" hidden>
+        <header class="command-heading">
+          <div><p class="eyebrow">Workspace command center</p><h2 id="commands-heading" tabindex="-1">Command tabs</h2><p>Run host commands in the active workspace and return later to inspect output and exit status.</p></div>
+          <div class="command-workspace-context"><span>Active workspace</span><b id="command-workspace-name">No workspace selected</b><code id="command-workspace-path"></code></div>
+        </header>
+        <div id="command-workspace-status" class="command-workspace-status" aria-label="Running commands by workspace"></div>
+        <p class="command-warning"><b>Host access</b><span>Commands run directly on this machine with the workspace as their working folder. Review every command before confirming.</span></p>
+        <div id="command-empty" class="command-empty" hidden><b>Select a workspace to use commands</b><span>Add or choose a workspace, then return here to create command tabs.</span><a href="#workspaces">Manage workspaces</a></div>
+        <div id="command-console" class="command-console" hidden>
+          <div class="command-tab-bar">
+            <div id="command-tabs" class="command-tabs" role="tablist" aria-label="Command tabs"></div>
+            <button id="command-add-tab" class="command-add-tab" type="button"><span aria-hidden="true">+</span> New tab</button>
+          </div>
+          <div id="command-tab-content" role="tabpanel" aria-labelledby="commands-heading">
+          <div class="command-toolbar">
+            <div class="step-field"><label for="command-tab-name">Tab name</label><input id="command-tab-name" maxlength="80" autocomplete="off"></div>
+            <button id="command-rename-tab" class="secondary-button" type="button">Save tab name</button>
+            <button id="command-remove-tab" class="secondary-button danger-button" type="button">Remove tab</button>
+            <p id="command-tab-status" role="status"></p>
+          </div>
+          <div class="command-stage">
+            <aside class="command-history" aria-labelledby="command-history-heading">
+              <div><h3 id="command-history-heading">Command history</h3><button id="command-refresh" class="secondary-button" type="button">Refresh</button></div>
+              <ol id="command-history-list"></ol>
+              <button id="command-history-more" class="secondary-button" type="button" hidden>Load older commands</button>
+            </aside>
+            <section class="command-output" aria-labelledby="command-output-heading">
+              <header><div><span id="command-output-status" class="command-status idle">Idle</span><h3 id="command-output-heading">Ready for a command</h3><p id="command-output-meta"></p></div><div class="command-output-actions"><button id="command-reuse" class="secondary-button" type="button" hidden>Use command again</button><button id="command-stop" class="secondary-button danger-button" type="button" hidden>Stop command</button></div></header>
+              <pre id="command-output-text" tabindex="0" aria-label="Command output">No command selected.</pre>
+              <p id="command-output-note" class="field-note"></p>
+            </section>
+          </div>
+          <form id="command-form" class="command-composer">
+            <div class="command-entry"><label for="command-input">Command</label><textarea id="command-input" name="command" rows="2" maxlength="12000" required placeholder="npm test" aria-describedby="command-help command-error"></textarea><p id="command-help" class="field-note">Runs from the workspace root. Ctrl / Command + Enter also runs the command.</p></div>
+            <div class="step-field command-timeout"><label for="command-timeout">Timeout</label><select id="command-timeout"><option value="0">No timeout</option><option value="60">1 minute</option><option value="300">5 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option></select></div>
+            <button id="command-run" class="dispatch-button compact-button" type="submit"><span>Run command</span><i aria-hidden="true"></i></button>
+          </form>
+          <p id="command-error" class="form-error" role="alert"></p>
+          <p id="command-status" class="field-note" role="status" aria-live="polite"></p>
+          </div>
+          <p class="command-boundary">Non-interactive Bash commands only; each run has a fresh environment. Keep servers in the foreground. Tabs persist across reloads; stopping SwitchYard stops its commands. No timeout means run until finished or stopped.</p>
+        </div>
+      </section>
+      <section class="hero" id="overview-panel">
+        <div class="hero-copy">
+          <p class="eyebrow">Engineering orchestration / local control</p>
+          <h2>Plan. Fork.<br><em>Prove. Review.</em></h2>
+          <p class="lede">Codex plans and reviews. Three independent attempts travel through stable 9router combos. You choose when execution begins.</p>
+        </div>
+        <div class="routing-lattice" aria-label="Workflow routing diagram">
+          <div class="route-label label-in">REQUEST</div>
+          <div class="route-node source"><span>LEAD</span><b>Codex</b></div>
+          <div class="trunk trunk-a"></div>
+          <div class="fork-lines"><i></i><i></i><i></i></div>
+          <div class="fork-nodes">
+            <div class="route-node"><span>FORK A</span><b>Build</b></div>
+            <div class="route-node"><span>FORK B</span><b>Harden</b></div>
+            <div class="route-node"><span>FORK C</span><b>Rethink</b></div>
+          </div>
+          <div class="trunk trunk-b"></div>
+          <div class="route-node destination"><span>GATE</span><b>Review</b></div>
+          <div class="signal signal-one"></div>
+          <div class="signal signal-two"></div>
+          <div class="signal signal-three"></div>
+        </div>
+      </section>
+
+      <section class="console-grid">
+        <article class="dispatch panel" id="dispatch-panel">
+          <div class="panel-heading">
+            <span class="panel-index">01</span>
+            <div><h2>Dispatch a change</h2><p>Using <button class="inline-action" id="recipe-name" type="button">Built-in engineering steps</button></p></div>
+          </div>
+          <form id="dispatch-form">
+            <label for="dispatch-workspace">Workspace</label>
+            <select id="dispatch-workspace" name="workspace_id" data-workspace-selector required disabled><option value="">Choose a saved workspace</option></select>
+            <input id="repository" type="hidden">
+            <p class="field-note" id="dispatch-workspace-settings">Add a workspace before dispatching.</p>
+            <p class="field-note" id="repository-help">Use a project folder or Git repository. Before the first dispatch, Switchyard records existing non-ignored files in a local baseline commit. Review your ignore rules first.</p>
+            <p class="field-note" id="repository-status" role="status"></p>
+
+            <label for="dispatch-workflow">Workflow (optional)</label>
+            <select id="dispatch-workflow" name="workflow_id" aria-describedby="dispatch-workflow-help"><option value="">Without a workflow - built-in steps</option></select>
+            <p class="field-note" id="dispatch-workflow-help" role="status">Use the built-in engineering steps without saved overrides, or choose a workflow. Either choice is recorded with this dispatch.</p>
+
+            <label for="request">What should change?</label>
+            <textarea id="request" name="request" required minlength="10" placeholder="Add campaign approval history with reviewer notes and tests."></textarea>
+
+            <fieldset class="delivery-options" id="dispatch-delivery">
+              <legend>After a successful run</legend>
+              <div class="delivery-mode" data-delivery-mode="dispatch"></div>
+              <div class="delivery-fields" data-delivery-fields="dispatch"></div>
+              <button class="inline-action" id="reset-dispatch-delivery" type="button">Use workspace delivery defaults</button>
+            </fieldset>
+
+            <label class="host-confirm" id="host-confirm">
+              <input type="checkbox" id="allow-host">
+              <span><b>Allow commands on this machine</b><small>Worktrees isolate files, not processes. Use trusted tasks only.</small></span>
+            </label>
+
+            <div class="form-error" id="form-error" role="alert"></div>
+            <button class="dispatch-button" type="submit"><span>Send to switchyard</span><i aria-hidden="true"></i></button>
+          </form>
+        </article>
+
+        <article class="line-status panel" id="system-panel">
+          <button class="refresh-button" id="refresh-combos" type="button">Refresh 9router</button>
+          <div class="panel-heading compact">
+            <span class="panel-index">02</span>
+            <div><h2>Line status</h2><p>The active tools and logical routes.</p></div>
+          </div>
+          <div class="status-list" id="status-list">
+            <div class="status-row"><span>Codex login</span><b>Checking</b></div>
+            <div class="status-row"><span>9router gateway</span><b>Checking</b></div>
+            <div class="status-row"><span>OpenCode</span><b>Checking</b></div>
+          </div>
+          <div class="combo-header"><span>Stable combos</span><small>Membership stays hidden from this workflow</small></div>
+          <p class="refresh-meta" id="combo-meta" aria-live="polite">Waiting for the first refresh.</p>
+          <div class="route-warning" id="route-warning" role="status"></div>
+          <div class="combo-list" id="combo-list"><span class="combo-chip pending">Loading routes</span></div>
+        </article>
+
+        <article class="runs panel" id="runs-panel">
+          <div class="panel-heading compact">
+            <span class="panel-index">03</span>
+            <div><h2>Dispatch log</h2><p>Workflow runs started from this console.</p></div>
+          </div>
+          <div id="run-list" class="run-list" aria-live="polite">
+            <div class="empty-state"><b>No dispatches yet</b><span>Run a workflow to start the dispatch history.</span></div>
+          </div>
+        </article>
+      </section>
+    <section id="git-panel" class="git-panel" aria-label="Git repository controls">
+      <div class="git-heading">
+        <div>
+          <p class="eyebrow">Repository control</p>
+          <h2>Git workspace</h2>
+          <p>Review changes, prepare commits, manage branches, sync remotes, and recover in-progress operations.</p>
+        </div>
+        <button class="secondary-button" id="refresh-git" type="button">Refresh changes</button>
+      </div>
+      <form id="git-controls" class="git-controls">
+        <div class="git-repository-field">
+          <label for="git-workspace">Workspace</label>
+          <select id="git-workspace" data-workspace-selector required disabled><option value="">Choose a saved workspace</option></select>
+          <input id="git-repository" type="hidden">
+        </div>
+        <fieldset class="git-comparison">
+          <legend>Compare</legend>
+          <label><input type="radio" name="git-comparison" value="working" checked><span>All changes</span></label>
+          <label><input type="radio" name="git-comparison" value="staged"><span>Staged</span></label>
+          <label><input type="radio" name="git-comparison" value="unstaged"><span>Unstaged</span></label>
+          <label><input type="radio" name="git-comparison" value="branch"><span>Branch changes</span></label>
+        </fieldset>
+        <div class="git-base-field" id="git-base-field" hidden>
+          <label for="git-base">Base branch</label>
+          <div class="git-base-controls">
+            <input id="git-base" name="git_base" list="git-branches" autocomplete="off" placeholder="main">
+            <datalist id="git-branches"></datalist>
+            <button class="secondary-button" type="submit">Compare branch</button>
+          </div>
+        </div>
+      </form>
+      <p id="git-status" class="field-note git-live-status" role="status"></p>
+      <div id="git-error" class="form-error" role="alert" tabindex="-1"></div>
+      <details id="git-output" class="git-output" hidden><summary>Last operation output</summary><pre id="git-output-text"></pre></details>
+      <dialog id="git-confirm" class="git-confirm" aria-labelledby="git-confirm-title" aria-describedby="git-confirm-message">
+        <form method="dialog">
+          <h3 id="git-confirm-title">Confirm Git action</h3>
+          <p id="git-confirm-repository"></p>
+          <p id="git-confirm-message"></p>
+          <div class="git-button-row"><button class="secondary-button" value="cancel" autofocus>Cancel</button><button class="secondary-button danger-button" id="git-confirm-accept" value="confirm">Confirm action</button></div>
+        </form>
+      </dialog>
+      <div id="git-content" class="git-content">
+        <div class="git-empty"><b>Select a repository to manage</b><span>Choose a workspace to inspect changes and run Git operations.</span></div>
+      </div>
+    </section>
+    <section id="steps-panel" class="steps-panel" aria-label="Reusable step templates">
+      <form id="steps-form">
+        <div class="workflow-heading">
+          <div>
+            <p class="eyebrow">Reusable building blocks</p>
+            <h2>Step templates</h2>
+            <p>Configure independent templates with a step type, default tool/model, and prompt. Reuse each template in any compatible workflow.</p>
+          </div>
+        </div>
+        <p class="scope-note"><b>No execution order here</b><span>Templates are independent building blocks. <a href="#workflows">Workflows</a> define their sequence. Per-workflow overrides never change the shared template.</span></p>
+        <div class="workflow-refresh"><button class="secondary-button" id="refresh-workflow-combos" type="button">Refresh 9router routes</button><span id="workflow-refresh-status" aria-live="polite"></span></div>
+        <ul class="step-catalog" id="step-catalog" aria-label="Independent step templates"></ul>
+        <div class="form-error" id="steps-error" role="alert"></div>
+        <p id="steps-save-status" class="field-note" role="status"></p>
+        <div class="workflow-actions">
+          <button class="secondary-button" id="add-step-template" type="button">Add step template</button>
+          <button class="dispatch-button compact-button" type="submit"><span>Save step templates</span><i aria-hidden="true"></i></button>
+        </div>
+      </form>
+    </section>
+    <section id="workflows-panel" class="workflows-panel" aria-label="Workflow configuration">
+      <form id="workflows-form">
+        <div class="workflow-builder-intro">
+          <div class="workflow-builder-copy">
+            <p class="eyebrow">Pipeline builder</p>
+            <h2>Build a workflow</h2>
+            <p>Edit a saved workflow or start with an empty route. Add reusable steps, arrange them, and override only what this workflow needs.</p>
+          </div>
+          <ol class="workflow-guide" aria-label="How to build a workflow">
+            <li><span>01</span><div><b>Choose</b><small>Select a workflow or create one.</small></div></li>
+            <li><span>02</span><div><b>Build</b><small>Add steps and drag them into order.</small></div></li>
+            <li><span>03</span><div><b>Save</b><small>Save the workflow or keep it as a draft.</small></div></li>
+          </ol>
+        </div>
+        <div class="workflow-toolbar">
+          <div class="step-field workflow-picker"><div class="workflow-picker-label"><label for="workflow-selector">Workflow to edit</label><span id="workflow-count" aria-live="polite">Loading workflows</span></div><select id="workflow-selector"></select></div>
+          <button class="create-workflow-button" id="add-workflow" data-create-workflow type="button"><span aria-hidden="true">+</span> New workflow</button>
+          <button class="secondary-button danger-button" id="delete-workflow" type="button" hidden>Delete workflow</button>
+        </div>
+        <div id="workflow-editor"></div>
+        <p id="workflow-dnd-announcement" class="workflow-sr-only" role="status"></p>
+        <div class="form-error" id="workflows-error" role="alert"></div><p id="workflows-status" class="field-note" role="status"></p>
+        <div class="workflow-actions" id="workflow-actions" hidden><label class="mcp-enabled"><input id="default-workflow" type="checkbox">Use as default for new dispatches</label><button class="dispatch-button compact-button" type="submit"><span>Save changes</span><i aria-hidden="true"></i></button></div>
+      </form>
+    </section>
+    <section id="mcps-panel" class="mcps-panel" aria-label="MCP configuration">
+      <div class="workflow-heading"><div><p class="eyebrow">Global tool connections</p><h2>Shared MCP servers</h2><p>Define a server once for Codex and OpenCode, then add a tool override only when one runtime needs different settings. All 9router combos use OpenCode's resolved connections.</p></div></div>
+      <p class="scope-note"><b>Scope: all repositories</b><span>Each run saves an MCP snapshot. Later global edits do not change existing runs.</span></p>
+      <p class="field-note">A tool override with the same server name replaces the shared definition for that tool. Only add trusted servers: local commands can execute on this machine and remote tools may change external data. OAuth sign-in remains separate in each CLI.</p>
+      <section class="mcp-catalog" aria-labelledby="mcp-catalog-heading">
+        <div class="mcp-catalog-heading"><div><h3 id="mcp-catalog-heading">MCP catalog</h3><p class="field-note">Start a shared draft from the supplied list. Each entry needs connection details from its official source; it is not installed or tested here. Install counts are a supplied snapshot, not live statistics.</p></div><div class="step-field"><label for="mcp-catalog-search">Find an MCP</label><input id="mcp-catalog-search" type="search" autocomplete="off" placeholder="Playwright, Firebase, Context7..."></div></div>
+        <p id="mcp-catalog-count" class="field-note" role="status">Loading catalog...</p>
+        <div id="mcp-catalog-results" class="mcp-catalog-results"></div>
+        <button id="mcp-catalog-more" class="secondary-button" type="button" hidden>Show more servers</button>
+      </section>
+      <form id="mcp-form">
+        <div id="mcp-tools"></div>
+        <p id="mcp-error" class="form-error" role="alert"></p>
+        <p id="mcp-status" class="field-note" role="status">Loading configuration...</p>
+        <div class="workflow-actions"><button class="secondary-button" id="cancel-mcps" type="button">Cancel changes</button><button class="dispatch-button compact-button" id="save-mcps" type="submit" disabled>Save MCP configuration</button></div>
+      </form>
+      <section class="mcp-export" aria-labelledby="mcp-export-heading">
+        <div><h3 id="mcp-export-heading">Use these servers in another CLI</h3><p class="field-note">Export saved settings as a secret-free fragment to merge into the tool's native configuration. Codex and OpenCode exports include their overrides; Claude Code and Cursor use shared servers only. Exporting never changes files.</p></div>
+        <div class="step-field"><label for="mcp-export-tool">CLI</label><select id="mcp-export-tool"><option value="codex">Codex</option><option value="opencode">OpenCode</option><option value="claude-code">Claude Code</option><option value="cursor">Cursor</option></select></div>
+        <button class="secondary-button" id="export-mcps" type="button">Generate export</button>
+        <div id="mcp-export-result" hidden><p id="mcp-export-destination" class="field-note"></p><pre id="mcp-export-output" tabindex="0"></pre><p id="mcp-export-warning" class="field-note"></p></div>
+      </section>
+    </section>
+    <section id="clis-panel" class="clis-panel" aria-label="Shared CLI configuration">
+      <div class="workflow-heading"><div><p class="eyebrow">Global command line</p><h2>AI runtimes and tools</h2><p>Detect installed AI apps, IDE agents, command-line tools, local runtimes, and creative tools across Linux, Windows, and macOS.</p></div></div>
+      <p class="scope-note"><b>Scope: all repositories</b><span>Each run saves a CLI snapshot. Later global edits do not change existing runs.</span></p>
+      <p class="field-note">Availability checks inspect commands and known application paths without launching tools. Detection does not confirm authentication, connectivity, or workflow execution. Codex and OpenCode are SwitchYard's integrated runtimes; profiles you enable are shared with agents only as registered commands. Complete authentication and endpoint setup in each tool. Never put credentials in command arguments.</p>
+      <form id="cli-form" class="cli-form">
+        <datalist id="cli-provider-options"><option value="9router"></option><option value="OpenAI"></option><option value="Anthropic"></option><option value="Google"></option><option value="GitHub"></option><option value="AWS"></option><option value="xAI"></option><option value="OpenRouter"></option><option value="Ollama"></option></datalist>
+        <div class="cli-grid">
+          <section class="cli-card"><span class="step-kind">Planning and review</span><div class="cli-card-heading"><h3>OpenAI Codex CLI / App</h3><span id="codex-cli-status" class="cli-detection-badge">Checking</span></div><div class="cli-config-fields"><div class="step-field wide"><label for="codex-command">Command (JSON array)</label><input id="codex-command" required></div><div class="step-field"><label for="codex-provider">Provider ID</label><input id="codex-provider" list="cli-provider-options" maxlength="120" pattern="[A-Za-z0-9_-]+" placeholder="Built-in OpenAI provider"></div><div class="step-field"><label for="codex-model">Default model</label><input id="codex-model" maxlength="200" placeholder="Use the Codex default"></div><div class="step-field wide"><label for="codex-base-url">Provider endpoint</label><input id="codex-base-url" type="url" maxlength="2000" placeholder="https://api.example.com/v1"></div><div class="step-field wide"><label for="codex-api-key-env">API key environment variable</label><input id="codex-api-key-env" maxlength="120" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"><span class="engine-note">Only the variable name is saved.</span></div></div><button class="secondary-button cli-setup-button" type="button" data-cli-setup="codex">View setup instructions</button></section>
+          <section class="cli-card"><span class="step-kind">9router execution</span><div class="cli-card-heading"><h3>OpenCode</h3><span id="opencode-cli-status" class="cli-detection-badge">Checking</span></div><div class="cli-config-fields"><div class="step-field wide"><label for="opencode-command">Command (JSON array)</label><input id="opencode-command" required></div><div class="step-field"><label for="opencode-provider">Provider ID</label><input id="opencode-provider" list="cli-provider-options" maxlength="120" placeholder="9router"></div><div class="step-field"><label for="opencode-model">Default model</label><input id="opencode-model" maxlength="200" placeholder="Workflow route"></div><div class="step-field wide"><label for="opencode-base-url">Provider endpoint</label><input id="opencode-base-url" type="url" maxlength="2000" placeholder="https://api.example.com/v1"></div><div class="step-field wide"><label for="opencode-api-key-env">API key environment variable</label><input id="opencode-api-key-env" maxlength="120" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"><span class="engine-note">Only the variable name is saved.</span></div></div><button class="secondary-button cli-setup-button" type="button" data-cli-setup="opencode">View setup instructions</button></section>
+        </div>
+        <section class="managed-clis" aria-labelledby="managed-clis-title">
+          <div class="additional-clis-heading"><div><h3 id="managed-clis-title">AI tool catalog</h3><p class="field-note">Platform badges describe catalog compatibility; local detection determines what is installed. Expand a card to review setup and saved preferences.</p></div><span id="managed-cli-count" class="managed-cli-count" aria-live="polite"></span></div>
+          <div id="managed-cli-list" class="managed-cli-list"></div>
+        </section>
+        <section class="additional-clis" aria-labelledby="additional-clis-title">
+          <div class="additional-clis-heading"><div><h3 id="additional-clis-title">Custom command-line tools</h3><p class="field-note">Register other installed commands and describe when agents may use them.</p></div><button class="secondary-button" id="add-cli" type="button">Add custom tool</button></div>
+          <div id="additional-cli-list"></div>
+        </section>
+        <section class="cli-shared"><h3>Shared access</h3><div class="step-field"><label for="cli-paths">Additional PATH directories (one per line)</label><textarea id="cli-paths" placeholder="/opt/tools/bin"></textarea><span class="engine-note">Directories are prepended only for Switchyard child processes.</span></div><div class="step-field"><label for="cli-env">Environment-variable names (comma-separated)</label><input id="cli-env" placeholder="JIRA_TOKEN, GITHUB_TOKEN"><span class="engine-note">Values are read from the process environment when a run starts and are never saved here.</span></div></section>
+        <p id="cli-error" class="form-error" role="alert"></p><p id="cli-status" class="field-note" role="status">Loading configuration...</p>
+        <div class="cli-actions"><button class="secondary-button" id="check-clis" type="button">Check availability</button><button class="dispatch-button compact-button" id="save-clis" type="submit" disabled>Save global CLI access</button></div>
+      </form>
+      <dialog id="cli-setup-dialog" class="cli-setup-dialog" aria-labelledby="cli-setup-title"><div class="cli-setup-dialog-heading"><div><p class="eyebrow">Tool configuration</p><h3 id="cli-setup-title">Setup instructions</h3></div><button class="dialog-close" id="close-cli-setup" type="button" aria-label="Close setup instructions">Close</button></div><p id="cli-setup-instructions"></p><div id="cli-setup-output" class="cli-setup-output" hidden><div><b id="cli-setup-kind">Configuration</b><button class="secondary-button" id="copy-cli-setup" type="button">Copy configuration</button></div><pre><code id="cli-setup-content"></code></pre></div><p id="cli-setup-status" class="field-note" role="status"></p></dialog>
+    </section>
+    <section id="delivery-panel" class="delivery-panel" aria-label="Global delivery defaults">
+      <div class="workflow-heading"><div><p class="eyebrow">Git delivery</p><h2>Global delivery defaults</h2><p>Choose what happens after a workflow integrates successfully. Every dispatch can override these defaults before it starts.</p></div></div>
+      <p class="scope-note"><b>Default: local only</b><span>Pushes are never forced. Failed workflows are never pushed and never open a PR.</span></p>
+      <form id="delivery-form">
+        <fieldset><legend>Default action</legend><div class="delivery-mode" data-delivery-mode="default"></div></fieldset>
+        <div class="delivery-fields" data-delivery-fields="default"></div>
+        <p id="delivery-error" class="form-error" role="alert"></p><p id="delivery-status" class="field-note" role="status">Loading delivery defaults...</p>
+        <button class="dispatch-button compact-button" id="save-delivery" type="submit" disabled><span>Save delivery defaults</span><i aria-hidden="true"></i></button>
+      </form>
+    </section>
+    </main>
+    <dialog id="theme-confirm" class="theme-confirm" aria-labelledby="theme-confirm-title" aria-describedby="theme-confirm-message">
+      <form method="dialog">
+        <p class="eyebrow">Confirm change</p>
+        <h2 id="theme-confirm-title">Confirm action</h2>
+        <p id="theme-confirm-message"></p>
+        <div class="theme-confirm-actions"><button class="secondary-button" value="cancel" autofocus>Cancel</button><button class="secondary-button danger-button" id="theme-confirm-accept" value="confirm">Confirm</button></div>
+      </form>
+    </dialog>
+    <aside id="run-drawer" class="run-drawer" aria-label="Run details" aria-hidden="true">
+      <header class="run-drawer-header"><span>Run details</span><button id="run-drawer-close" class="dialog-close" type="button" aria-label="Close run details">Close</button></header>
+      <div id="run-detail"></div>
+    </aside>
+    <script src="/assets/theme-controls.js" defer></script>
+    <script src="/assets/run-details.js" defer></script>
+    <script src="/assets/app.js" defer></script>
+    <script src="/assets/workspaces.js" defer></script>
+    <script src="/assets/command-console.js" defer></script>
+    <script src="/assets/chat.js" defer></script>
+    <script src="/assets/git-diff.js" defer></script>
+    <script src="/assets/git-view.js" defer></script>
+  </body>
+</html>

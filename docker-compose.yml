@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orchestrator
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+
+  langfuse:
+    image: langfuse/langfuse:2
+    depends_on:
+      - langfuse-db
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: local-development-secret-change-me
+      SALT: local-development-salt-change-me
+      NEXTAUTH_URL: http://localhost:3000
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  postgres-data:
+  redis-data:
+  langfuse-postgres-data:
