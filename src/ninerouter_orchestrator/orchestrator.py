@@ -12,7 +12,7 @@ from .adapters.codex import CodexAdapter
 from .adapters.nine_router import NineRouterExecutor, NineRouterReasoner
 from .cli_config import CliConfiguration
 from .config import Settings
-from .git import GitRepository
+from .git import SWITCHYARD_GIT_CONFIG, GitRepository
 from .mcp_config import McpConfiguration
 from .models import (
     CandidateDecision,
@@ -358,10 +358,7 @@ Plan:
                 entry["decision"] = decision.model_dump()
                 self._report(f"Integrating {ticket.id} and running checks", run)
                 self.repository.git(
-                    "-c",
-                    "user.name=9router Orchestrator",
-                    "-c",
-                    "user.email=hassan.shaban.harera@gmail.com",
+                    *SWITCHYARD_GIT_CONFIG,
                     "cherry-pick",
                     selected.commit,
                     cwd=workspace,

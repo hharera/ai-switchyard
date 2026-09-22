@@ -5,6 +5,13 @@ from pathlib import Path
 
 from .process import ProcessError, run_process
 
+SWITCHYARD_GIT_CONFIG = (
+    "-c",
+    "user.name=Switchyard",
+    "-c",
+    "user.email=switchyard@localhost",
+)
+
 
 def slug(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-.").lower()
@@ -59,8 +66,8 @@ class GitRepository:
             raise ProcessError("Git HEAD cannot be read. Repair the repository before dispatching.")
         self.git("add", "--all")
         self.git(
-            "-c", "user.name=Switchyard", "-c", "user.email=switchyard@localhost",
-            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m",
+            *SWITCHYARD_GIT_CONFIG, "-c", "commit.gpgsign=false",
+            "commit", "--allow-empty", "-m",
             "chore: record baseline before first Switchyard dispatch",
         )
         return {"initialized": initialized, "baseline_commit": self.head()}
@@ -114,10 +121,7 @@ class GitRepository:
             return None
         self.git("add", "--all", cwd=workspace)
         self.git(
-            "-c",
-            "user.name=9router Orchestrator",
-            "-c",
-            "user.email=hassan.shaban.harera@gmail.com",
+            *SWITCHYARD_GIT_CONFIG,
             "commit",
             "-m",
             message,

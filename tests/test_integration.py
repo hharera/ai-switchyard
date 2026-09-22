@@ -105,6 +105,9 @@ def test_run_preserves_dirty_checkout(monkeypatch, tmp_path):
     assert progress[-1][1]["review"]["approved"] is True
     assert result["base"] == base
     assert repo.git("show", f"{result['integration_branch']}:sample.txt").stdout == "candidate"
+    assert repo.git(
+        "show", "-s", "--format=%an <%ae>%n%cn <%ce>", result["integration_branch"]
+    ).stdout.splitlines() == ["Switchyard <switchyard@localhost>"] * 2
     assert repo.head() == base
     assert repo.git("symbolic-ref", "HEAD").stdout == branch
     assert repo.git("status", "--porcelain").stdout == status
@@ -132,6 +135,9 @@ def test_real_worktree_isolation(tmp_path):
     (fork / "sample.txt").write_text("candidate")
     candidate = repo.commit_all(fork, "candidate")
     assert candidate != base
+    assert repo.git("show", "-s", "--format=%cn <%ce>", candidate).stdout.strip() == (
+        "Switchyard <switchyard@localhost>"
+    )
     assert repo.head() == base
     assert (repo_path / "sample.txt").read_text() == "base"
 
@@ -155,6 +161,9 @@ def test_dispatch_initializes_and_commits_existing_files_as_baseline(tmp_path):
     assert repo.git("status", "--porcelain").stdout == ""
     assert repo.git("log", "-1", "--pretty=%s").stdout.strip() == (
         "chore: record baseline before first Switchyard dispatch"
+    )
+    assert repo.git("log", "-1", "--pretty=%cn <%ce>").stdout.strip() == (
+        "Switchyard <switchyard@localhost>"
     )
 
 
