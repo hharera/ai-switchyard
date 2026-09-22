@@ -1,5 +1,5 @@
 {
-  "name": "ai-switchyard",
+  "name": "openswitch",
   "version": "0.1.0",
   "description": "Subscription-first engineering orchestration through stable 9router combos",
   "type": "module",

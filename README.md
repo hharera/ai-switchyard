@@ -6,14 +6,14 @@ installs the engine, and exposes the `switchyard` command.
 
 ## Public installation
 
-Public npm publication is prepared under the `ai-switchyard` package name but remains blocked until
+Public npm publication is prepared under the `openswitch` package name but remains blocked until
 the release owner chooses a distribution license. Run `npm run release:check` to see the outstanding
 owner decision; publication cannot proceed accidentally while the package is marked `UNLICENSED`.
 
 After those fields are set and the package is published, installation is the same on every platform:
 
 ```bash
-npm install --global ai-switchyard
+npm install --global openswitch
 switchyard --help
 switchyard ui
 ```
@@ -32,7 +32,7 @@ Installation needs network access to download Python dependencies from PyPI.
 If npm lifecycle scripts were disabled, enable them and rebuild the installed package:
 
 ```bash
-npm rebuild --global ai-switchyard
+npm rebuild --global openswitch
 ```
 
 Windows validation commands run through `cmd.exe`; macOS and Linux use Bash when available, with
@@ -71,7 +71,7 @@ Or build and install a portable npm tarball:
 
 ```bash
 npm pack
-npm install -g ./ai-switchyard-0.1.0.tgz
+npm install -g ./openswitch-0.1.0.tgz
 ```
 
 Existing `orchestrate` and `orchestrate-ui` Python commands remain available for compatibility.
@@ -86,7 +86,7 @@ confirmed in CI before claiming those platforms are verified.
 
 ## Publishing a release
 
-1. Verify that the `ai-switchyard` npm name is still available and that you have the right to use it.
+1. Verify that the `openswitch` npm name is still available and that you have the right to use it.
    The installed command remains `switchyard`.
 2. Choose a distribution license, add its `LICENSE` file, and set the npm and Python license
    metadata consistently.
