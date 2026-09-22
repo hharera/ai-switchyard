@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -28,7 +29,11 @@ def repository(tmp_path: Path) -> Path:
     return root
 
 
-def test_working_tree_snapshot_and_lazy_patches(tmp_path):
+@pytest.mark.parametrize("no_nofollow", [False, True])
+def test_working_tree_snapshot_and_lazy_patches(tmp_path, monkeypatch, no_nofollow):
+    if no_nofollow:
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
     root = repository(tmp_path)
     (root / "tracked.txt").write_text("first\nchanged\n")
     (root / "new file.txt").write_text("one\ntwo\n")
@@ -49,6 +54,25 @@ def test_working_tree_snapshot_and_lazy_patches(tmp_path):
     untracked = review.patch("new file.txt")
     assert untracked["patch"].startswith("@@ -0,0 +1,2 @@")
     assert "+one" in untracked["patch"]
+
+
+def test_untracked_preview_rejects_file_swapped_during_open(tmp_path, monkeypatch):
+    root = repository(tmp_path)
+    preview = root / "preview.txt"
+    preview.write_text("safe\n")
+    outside = tmp_path / "private.txt"
+    outside.write_text("do not expose\n")
+    review = GitReview(root)
+    original_open = os.open
+
+    def swapped_open(path, flags, mode=0o777):
+        return original_open(outside if Path(path) == preview else path, flags, mode)
+
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(os, "open", swapped_open)
+    result = review.untracked_patch({"path": "preview.txt"})
+    assert result["patch"] == ""
+    assert "unavailable" in result["message"]
 
 
 def test_branch_comparison_uses_merge_base(tmp_path):

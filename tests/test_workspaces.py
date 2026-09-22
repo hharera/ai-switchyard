@@ -120,7 +120,7 @@ def test_workspace_save_initializes_a_subfolder_as_an_independent_repository(con
 
     assert response.status_code == 200
     assert (nested / ".git").is_dir()
-    assert git(nested, "rev-parse", "--show-toplevel") == str(nested)
+    assert Path(git(nested, "rev-parse", "--show-toplevel")) == nested
 
 
 @pytest.mark.parametrize("kind", ["bare", "broken", "broken-parent"])

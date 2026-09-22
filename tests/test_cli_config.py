@@ -1,5 +1,6 @@
 import os
 import tomllib
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -69,7 +70,7 @@ def test_cli_runtime_resolves_shared_environment_without_storing_values(monkeypa
     config = sample()
     runtime = config.runtime_env()
     assert runtime["JIRA_TOKEN"] == "secret-value"
-    assert runtime["PATH"].startswith("/opt/shared/bin")
+    assert runtime["PATH"].split(os.pathsep)[0] == str(Path("/opt/shared/bin"))
     assert "secret-value" not in config.model_dump_json()
 
 
@@ -122,7 +123,7 @@ def test_detection_distinguishes_command_and_leftover_files(monkeypatch, tmp_pat
     assert status["available"] is True
     assert status["command_available"] is False
     assert status["detected_by"] == "path"
-    assert status["resolved"] == str(tmp_path / ".claude/settings.json")
+    assert Path(status["resolved"]) == tmp_path / ".claude/settings.json"
 
 
 def test_detection_uses_configured_path_and_does_not_execute(monkeypatch, tmp_path):
@@ -133,7 +134,7 @@ def test_detection_uses_configured_path_and_does_not_execute(monkeypatch, tmp_pa
     config.tools[0].command = ["my-claude"]
     status = config.statuses()["tool:claude-code"]
     assert status["command_available"] is True
-    assert status["resolved"] == str(executable)
+    assert Path(status["resolved"]) == executable
 
 
 def test_legacy_custom_tool_names_do_not_overwrite_catalog_status(monkeypatch):
@@ -212,7 +213,7 @@ def test_orchestrator_uses_shared_cli_profiles(tmp_path):
     runner = EngineeringOrchestrator(tmp_path, Settings(), cli_config=config)
     assert runner.planner.cli.command == config.codex.command
     assert runner.executor.cli.command == config.opencode.command
-    assert runner.planner.shared_env["PATH"].startswith("/opt/shared/bin")
+    assert runner.planner.shared_env["PATH"].split(os.pathsep)[0] == str(Path("/opt/shared/bin"))
     assert "Read and update Jira issues" in runner._step_prompt(runner.workflow.step("plan"))
 
 

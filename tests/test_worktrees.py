@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -196,7 +197,9 @@ def test_missing_detached_and_unicode_worktrees_are_safe(monkeypatch, tmp_path):
         fork_number=0, start_point="HEAD",
     )
     git(detached, "checkout", "--detach")
-    odd = state_dir / "worktrees" / "run space" / "ticket-\u00e9\nline" / "fork-1"
+    # Windows forbids newline characters in filenames; retain Unicode/space coverage there.
+    ticket = "ticket-\u00e9 line" if os.name == "nt" else "ticket-\u00e9\nline"
+    odd = state_dir / "worktrees" / "run space" / ticket / "fork-1"
     git(root, "worktree", "add", "-b", "odd", str(odd))
     entries = {item["path"]: item for item in repo.managed_worktrees(state_dir)}
     assert entries[str(missing)]["prunable"] is True

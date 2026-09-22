@@ -147,6 +147,21 @@ def test_stop_escalates_for_children_that_ignore_termination(console, tmp_path):
     assert owned.process.poll() is not None
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group behavior")
+@pytest.mark.parametrize("returncode", [None, -9])
+def test_termination_permission_error_is_ignored_only_after_exit(monkeypatch, returncode):
+    def denied(*args):
+        raise PermissionError("process group unavailable")
+
+    monkeypatch.setattr(os, "killpg", denied)
+    owned = SimpleNamespace(job=None, process=SimpleNamespace(pid=123, poll=lambda: returncode))
+    if returncode is None:
+        with pytest.raises(PermissionError):
+            CommandConsole._terminate(owned, force=True)
+    else:
+        CommandConsole._terminate(owned, force=True)
+
+
 def test_console_read_routes_reject_cross_origin_and_missing_client_header():
     from ninerouter_orchestrator.web import app
 

@@ -27,7 +27,8 @@ def write_jsonl(path, values):
 
 @pytest.fixture
 def history(tmp_path, monkeypatch):
-    for key in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME"):
+    for key in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+                "APPDATA", "HERMES_HOME"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "home/AppData/Local"))
     return ChatHistory(tmp_path / "home")

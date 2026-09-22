@@ -233,6 +233,10 @@ class CommandConsole:
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # macOS may report EPERM for a group whose leader has already exited.
+            if process.poll() is None:
+                raise
 
     def stop(self, workspace_id, run_id, reason="stopped"):
         with self.lock:
@@ -281,6 +285,7 @@ class CommandConsole:
         reader.start()
         output_finished = False
         tree_terminated = False
+        status = "failed"
         try:
             while True:
                 try:
@@ -298,8 +303,10 @@ class CommandConsole:
                 current = time.monotonic()
                 if timeout and current - started >= timeout and owned.reason is None:
                     self.stop(owned.workspace_id, run_id, "timed_out")
-                if owned.stopped_at is not None and current - owned.stopped_at >= 1:
+                if (owned.stopped_at is not None and current - owned.stopped_at >= 1
+                        and not tree_terminated):
                     self._terminate(owned, force=True)
+                    tree_terminated = True
                 if process.poll() is not None:
                     if not tree_terminated:
                         self._terminate(owned, force=True)
