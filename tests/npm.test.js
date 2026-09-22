@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,7 +61,9 @@ process.exit(7);
   });
   assert.equal(result.status, 7, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), {
-    args: ["-m", "ninerouter_orchestrator.cli", ...args], cwd: directory, value: "preserved",
+    args: ["-m", "ninerouter_orchestrator.cli", ...args],
+    cwd: realpathSync(directory),
+    value: "preserved",
   });
 });
 
