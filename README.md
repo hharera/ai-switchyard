@@ -6,11 +6,10 @@ installs the engine, and exposes the `switchyard` command.
 
 ## Public installation
 
-Public npm publication is prepared under the `openswitch` package name but remains blocked until
-the release owner chooses a distribution license. Run `npm run release:check` to see the outstanding
-owner decision; publication cannot proceed accidentally while the package is marked `UNLICENSED`.
+Public npm publication is prepared under the `openswitch` package name and the project is available
+under the MIT License. Run `npm run release:check` before publishing to verify the release metadata.
 
-After those fields are set and the package is published, installation is the same on every platform:
+After the package is published, installation is the same on every platform:
 
 ```bash
 npm install --global openswitch
@@ -88,8 +87,7 @@ confirmed in CI before claiming those platforms are verified.
 
 1. Verify that the `openswitch` npm name is still available and that you have the right to use it.
    The installed command remains `switchyard`.
-2. Choose a distribution license, add its `LICENSE` file, and set the npm and Python license
-   metadata consistently.
+2. Keep the MIT license metadata and `LICENSE` file consistent across the npm and Python packages.
 3. Keep versions in `package.json` and `pyproject.toml` equal. Run `npm test`,
    `npm run test:install`, and `npm run release:check` before releasing.
 4. Configure the repository secret `NPM_TOKEN` with permission to publish the chosen package.
