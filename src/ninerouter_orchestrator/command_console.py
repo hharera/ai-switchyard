@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import codecs
 import os
-import selectors
+import queue
 import signal
 import sqlite3
 import subprocess
@@ -14,7 +14,8 @@ from pathlib import Path
 
 from .job_store import now
 from .paths import data_dir
-from .process import tool_path
+from .process import find_tool, shell_argv, tool_path
+from .windows_job import WindowsJob, launch_in_job
 
 ACTIVE = {"running", "stopping"}
 OUTPUT_LIMIT = 262_144
@@ -31,6 +32,17 @@ class RunningCommand:
     reason: str | None = None
     stopped_at: float | None = None
     thread: threading.Thread | None = None
+    job: WindowsJob | None = None
+
+
+def command_argv(command: str, *, windows: bool | None = None) -> list[str]:
+    is_windows = windows if windows is not None else os.name == "nt"
+    if is_windows:
+        return shell_argv(command, windows=True)
+    bash = find_tool("bash")
+    if not bash:
+        raise ConsoleError("Bash is unavailable. Install Bash or run the command in a terminal.")
+    return [bash, "--noprofile", "--norc", "-c", command]
 
 
 class CommandConsole:
@@ -159,8 +171,6 @@ class CommandConsole:
             return any(item.workspace_id == workspace_id for item in self.running.values())
 
     def start(self, workspace_id, tab_id, repository, command, timeout, env=None):
-        if os.name != "posix":
-            raise ConsoleError("The command console currently requires a POSIX host and Bash.")
         if not Path(repository).is_dir():
             raise ConsoleError("Workspace folder is unavailable. Check its repository path.")
         with self.lock:
@@ -178,21 +188,33 @@ class CommandConsole:
             )
             db.commit()
             try:
-                process = subprocess.Popen(
-                    ["bash", "--noprofile", "--norc", "-c", command], cwd=repository,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    start_new_session=True, bufsize=0,
-                    env={**os.environ, "PATH": tool_path(), **(env or {}),
-                         "TERM": "dumb", "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"},
-                )
-            except OSError:
+                command_env = {
+                    **os.environ, "PATH": tool_path(), **(env or {}),
+                    "TERM": "dumb", "NO_COLOR": "1", "PYTHONUNBUFFERED": "1",
+                }
+                job = None
+                if os.name == "nt":
+                    argv = command_argv(command)
+                    # cmd /s /c removes these outer quotes; it does not understand the
+                    # backslash-escaped quotes that list2cmdline applies to normal argv.
+                    command_line = subprocess.list2cmdline(argv[:-1]) + ' "' + argv[-1] + '"'
+                    process, job = launch_in_job(
+                        command_line, cwd=repository, env=command_env
+                    )
+                else:
+                    process = subprocess.Popen(
+                        command_argv(command), cwd=repository, env=command_env,
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        bufsize=0, start_new_session=True,
+                    )
+            except (ConsoleError, OSError) as exc:
                 db.execute(
                     "UPDATE runs SET status='failed', ended_at=?, output=? WHERE id=?",
-                    (now(), "Unable to start Bash. Check installation and folder permissions.", run_id),
+                    (now(), f"Unable to start the command shell. {exc}", run_id),
                 )
                 db.commit()
                 return self.get_run(workspace_id, run_id)
-            owned = RunningCommand(process, workspace_id)
+            owned = RunningCommand(process, workspace_id, job=job)
             self.running[run_id] = owned
             owned.thread = threading.Thread(
                 target=self._watch, args=(run_id, owned, timeout), daemon=True,
@@ -202,9 +224,13 @@ class CommandConsole:
             return self.get_run(workspace_id, run_id)
 
     @staticmethod
-    def _signal(owned, sig):
+    def _terminate(owned, *, force: bool):
+        process = owned.process
+        if owned.job is not None:
+            owned.job.terminate()
+            return
         try:
-            os.killpg(owned.process.pid, sig)
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
         except ProcessLookupError:
             pass
 
@@ -215,7 +241,7 @@ class CommandConsole:
             if owned and owned.reason is None:
                 owned.reason = reason
                 owned.stopped_at = time.monotonic()
-                self._signal(owned, signal.SIGTERM)
+                self._terminate(owned, force=False)
                 self._db().execute("UPDATE runs SET status='stopping' WHERE id=?", (run_id,))
                 self._db().commit()
                 return self.get_run(workspace_id, run_id)
@@ -227,39 +253,74 @@ class CommandConsole:
         truncated = False
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         process = owned.process
+        chunks: queue.Queue[bytes | None | Exception] = queue.Queue(maxsize=32)
+        reading_stopped = threading.Event()
+
+        def enqueue(chunk):
+            while not reading_stopped.is_set():
+                try:
+                    chunks.put(chunk, timeout=0.1)
+                    return
+                except queue.Full:
+                    pass
+
+        def read_output():
+            try:
+                while chunk := process.stdout.read(8192):
+                    enqueue(chunk)
+                    if reading_stopped.is_set():
+                        return
+            except Exception as exc:  # noqa: BLE001 - report pipe failures to the supervisor.
+                enqueue(exc)
+            finally:
+                enqueue(None)
+
+        reader = threading.Thread(
+            target=read_output, daemon=True, name=f"command-output-{run_id[:8]}"
+        )
+        reader.start()
+        output_finished = False
+        tree_terminated = False
         try:
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                while True:
-                    for key, _ in selector.select(0.1):
-                        chunk = os.read(key.fileobj.fileno(), 8192)
-                        if chunk:
-                            output += decoder.decode(chunk)
-                            truncated |= len(output) > OUTPUT_LIMIT
-                            output = output[-OUTPUT_LIMIT:]
-                        else:
-                            selector.unregister(key.fileobj)
-                    current = time.monotonic()
-                    if timeout and current - started >= timeout and owned.reason is None:
-                        self.stop(owned.workspace_id, run_id, "timed_out")
-                    if owned.stopped_at is not None and current - owned.stopped_at >= 1:
-                        self._signal(owned, signal.SIGKILL)
-                    if process.poll() is not None:
-                        # A finished shell must not leave background children holding the pipe open.
-                        self._signal(owned, signal.SIGKILL)
-                        if not selector.get_map():
-                            break
-                    if current - last_flush >= 0.25:
-                        self._output(run_id, output, truncated)
-                        last_flush = current
+            while True:
+                try:
+                    chunk = chunks.get(timeout=0.1)
+                    if chunk is None:
+                        output_finished = True
+                    elif isinstance(chunk, Exception):
+                        raise chunk
+                    else:
+                        output += decoder.decode(chunk)
+                        truncated |= len(output) > OUTPUT_LIMIT
+                        output = output[-OUTPUT_LIMIT:]
+                except queue.Empty:
+                    pass
+                current = time.monotonic()
+                if timeout and current - started >= timeout and owned.reason is None:
+                    self.stop(owned.workspace_id, run_id, "timed_out")
+                if owned.stopped_at is not None and current - owned.stopped_at >= 1:
+                    self._terminate(owned, force=True)
+                if process.poll() is not None:
+                    if not tree_terminated:
+                        self._terminate(owned, force=True)
+                        tree_terminated = True
+                    if output_finished:
+                        break
+                if current - last_flush >= 0.25:
+                    self._output(run_id, output, truncated)
+                    last_flush = current
             output += decoder.decode(b"", final=True)
             self._output(run_id, output[-OUTPUT_LIMIT:], truncated or len(output) > OUTPUT_LIMIT)
             status = owned.reason or ("completed" if process.returncode == 0 else "failed")
         except Exception:  # noqa: BLE001 - preserve failures and clean up owned processes.
-            self._signal(owned, signal.SIGKILL)
+            self._terminate(owned, force=True)
             process.wait()
             status = "failed"
         finally:
+            reading_stopped.set()
+            if owned.job is not None:
+                owned.job.close()
+            reader.join(timeout=2)
             process.stdout.close()
             with self.lock:
                 self._db().execute(

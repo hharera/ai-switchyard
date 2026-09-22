@@ -1,0 +1,37 @@
+#workspace[data-view="worktrees"] .console-grid { display: none; }
+.worktrees-panel { min-width: 0; padding: 28px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--paper-bright); box-shadow: var(--shadow); }
+.worktrees-panel .workflow-heading > button { flex-shrink: 0; align-self: flex-start; min-height: 42px; }
+.worktrees-panel .scope-note span { text-align: start; }
+.worktree-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0; }
+.worktree-summary span { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); color: var(--ink-soft); font-size: 12px; }
+.worktree-summary b { display: block; margin-bottom: 4px; color: var(--ink); font: 700 24px var(--font-mono); font-variant-numeric: tabular-nums; }
+.worktree-toolbar { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(170px, 220px) auto; gap: 14px; align-items: end; margin: 24px 0; }
+.worktree-toolbar .secondary-button { min-height: 42px; }
+.worktree-list { display: grid; gap: 16px; margin-top: 18px; }
+.worktree-card { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper-bright); }
+.worktree-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.worktree-kind { color: var(--signal-dark); font: 700 11px var(--font-sans); letter-spacing: .08em; text-transform: uppercase; }
+.worktree-card h3 { margin: 5px 0 0; font: 700 20px var(--font-sans); overflow-wrap: anywhere; }
+.worktree-card h3 small { color: var(--ink-soft); font: 500 12px var(--font-mono); }
+.worktree-badges { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.worktree-badge { display: inline-flex; align-items: center; min-height: 28px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--paper); color: var(--ink); font: 600 11px var(--font-sans); }
+.worktree-details { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 2fr) minmax(0, .6fr); gap: 16px; margin: 20px 0 0; }
+.worktree-details > div { min-width: 0; }
+.worktree-details dt { margin-bottom: 5px; color: var(--ink-soft); font: 600 11px var(--font-sans); letter-spacing: .06em; text-transform: uppercase; }
+.worktree-details dd { margin: 0; font: 500 12px/1.55 var(--font-mono); overflow-wrap: anywhere; }
+.worktree-details .worktree-path { grid-column: 1 / -1; }
+.worktree-note { margin: 16px 0 0; color: var(--ink-soft); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.worktree-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+.worktree-actions button { min-height: 40px; }
+.worktree-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.worktrees-panel .step-field input { font-size: 16px; }
+@media (max-width: 58rem) {
+  .worktrees-panel { padding: 18px; }
+  .worktrees-panel .workflow-heading, .worktree-card-heading { flex-direction: column; }
+  .worktree-toolbar { grid-template-columns: minmax(0, 1fr); }
+  .worktree-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .worktree-details { grid-template-columns: minmax(0, 1fr); }
+  .worktree-details .worktree-path { grid-column: auto; }
+  .worktree-badges { justify-content: flex-start; }
+}
+@media (max-width: 30rem) { .worktree-actions { flex-direction: column; } }

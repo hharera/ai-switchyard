@@ -289,6 +289,21 @@ def test_git_api_and_frontend_assets(tmp_path):
     assert "Git workspace" in page
 
 
+def test_git_diff_uses_bounded_scroll_regions_without_split_overlap():
+    diff_script = client.get("/assets/git-diff.js").text
+    css = client.get("/assets/styles.css").text
+
+    assert 'class="git-diff-scroll" tabindex="0" role="region"' in diff_script
+    assert ".git-file-list { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable;" in css
+    assert ".git-file-nav > :not(.git-file-list) { flex-shrink: 0; }" in css
+    assert ".git-diff-scroll { max-width: 100%; max-height: min(72vh, 760px); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }" in css
+    assert ".git-diff-scroll:focus-visible" in css
+    assert ".git-diff-table { width: max-content; min-width: 100%; border-collapse: collapse; table-layout: auto;" in css
+    assert ".git-diff-table .diff-code { min-width: 42rem;" in css
+    assert ".git-diff-table.split .diff-code { min-width: 32rem; }" in css
+    assert ".git-diff-table code { display: block; width: max-content; min-width: 100%;" in css
+
+
 def test_git_action_api_requires_confirmation_and_local_ui(tmp_path):
     root = repository(tmp_path)
     (root / "tracked.txt").write_text("changed\n")

@@ -12,6 +12,8 @@ def test_ui_uses_9router_brand_assets():
     assert 'rel="icon" href="/assets/favicon.svg" type="image/svg+xml"' in page
     assert "family=Inter:wght@400;500;600;700;800" in page
     assert 'class="brand-mark" aria-hidden="true"' in page
+    assert '<img src="/assets/favicon.svg" alt="" width="34" height="34">' in page
+    assert '.brand-mark img { display: block; width: 100%; height: 100%; }' in css
     assert "--paper: #fdfaf6;" in css
     assert "--signal: #e56a4a;" in css
     assert '--font-sans: "Inter"' in css
@@ -53,5 +55,6 @@ def test_ui_replaces_native_control_chrome_and_confirmations():
     assert 'input[type="checkbox"]' in css
     assert "appearance: none;" in css
     assert "window.ThemeControls" in controls
+    assert "refreshSelect" in controls
     assert "window.confirm(" not in scripts
     assert ".confirm(" not in scripts.replace("ThemeControls.confirm(", "")

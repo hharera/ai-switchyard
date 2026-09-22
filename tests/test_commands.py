@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 from types import SimpleNamespace
 
@@ -7,12 +8,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from ninerouter_orchestrator.command_api import command_router
-from ninerouter_orchestrator.command_console import CommandConsole, ConsoleError
+from ninerouter_orchestrator.command_console import CommandConsole, ConsoleError, command_argv
+from ninerouter_orchestrator.process import format_command
 from ninerouter_orchestrator.workspace_config import Workspace
 
-pytestmark = pytest.mark.skipif(
-    os.name != "posix", reason="The CMD tab currently requires a POSIX process supervisor."
-)
+
+def python_command(code):
+    return format_command([sys.executable, "-c", code])
 
 
 def wait_for(manager, workspace_id, run_id, timeout=5):
@@ -35,21 +37,24 @@ def console(tmp_path):
 def test_command_tabs_run_capture_and_persist_history(console, tmp_path):
     tab = console.create_tab("alpha", "Tests")
     run = console.start(
-        "alpha", tab["id"], tmp_path, "printf 'stdout\\n'; printf 'stderr\\n' >&2", 30
+        "alpha", tab["id"], tmp_path,
+        python_command("import sys; print('stdout'); print('stderr', file=sys.stderr)"), 30,
     )
 
     finished = wait_for(console, "alpha", run["id"])
 
     assert finished["status"] == "completed"
     assert finished["exit_code"] == 0
-    assert finished["output"] == "stdout\nstderr\n"
+    assert finished["output"].replace("\r\n", "\n") == "stdout\nstderr\n"
     assert console.tabs("alpha")[0]["latest"]["status"] == "completed"
-    assert console.history("alpha", tab["id"])["runs"][0]["command"].startswith("printf")
+    assert console.history("alpha", tab["id"])["runs"][0]["command"] == run["command"]
 
 
 def test_command_can_be_stopped_and_active_tab_cannot_be_removed(console, tmp_path):
     tab = console.create_tab("alpha", "Server")
-    run = console.start("alpha", tab["id"], tmp_path, "sleep 30", 0)
+    run = console.start(
+        "alpha", tab["id"], tmp_path, python_command("import time; time.sleep(30)"), 0
+    )
 
     with pytest.raises(ConsoleError, match="Stop the running command"):
         console.remove_tab("alpha", tab["id"])
@@ -57,14 +62,16 @@ def test_command_can_be_stopped_and_active_tab_cannot_be_removed(console, tmp_pa
     finished = wait_for(console, "alpha", run["id"])
 
     assert finished["status"] == "stopped"
-    assert finished["exit_code"] < 0
+    assert finished["exit_code"] != 0
     console.remove_tab("alpha", tab["id"])
     assert console.tabs("alpha") == []
 
 
 def test_command_timeout_and_restart_state(console, tmp_path):
     tab = console.create_tab("alpha", "Timeout")
-    run = console.start("alpha", tab["id"], tmp_path, "sleep 30", 1)
+    run = console.start(
+        "alpha", tab["id"], tmp_path, python_command("import time; time.sleep(30)"), 1
+    )
     assert wait_for(console, "alpha", run["id"])["status"] == "timed_out"
 
     console._db().execute(
@@ -83,7 +90,7 @@ def test_command_timeout_and_restart_state(console, tmp_path):
 def test_command_output_is_bounded(console, tmp_path):
     tab = console.create_tab("alpha", "Large output")
     run = console.start(
-        "alpha", tab["id"], tmp_path, "python3 -c \"print('x' * 300000)\"", 30
+        "alpha", tab["id"], tmp_path, python_command("print('x' * 300000)"), 30
     )
 
     finished = wait_for(console, "alpha", run["id"])
@@ -96,10 +103,16 @@ def test_command_output_is_bounded(console, tmp_path):
 def test_commands_run_in_parallel_across_workspaces_and_reject_overlap(console, tmp_path):
     alpha = console.create_tab("alpha", "Server")
     beta = console.create_tab("beta", "Tests")
-    active = console.start("alpha", alpha["id"], tmp_path, "printf ready; sleep 30", 0)
+    active = console.start(
+        "alpha", alpha["id"], tmp_path,
+        python_command("import time; print('ready', end='', flush=True); time.sleep(30)"), 0,
+    )
     with pytest.raises(ConsoleError, match="already has a running"):
-        console.start("alpha", alpha["id"], tmp_path, "printf rejected", 0)
-    other = console.start("beta", beta["id"], tmp_path, "pwd; exit 7", 0)
+        console.start("alpha", alpha["id"], tmp_path, python_command("print('rejected')"), 0)
+    other = console.start(
+        "beta", beta["id"], tmp_path,
+        python_command("import os, sys; print(os.getcwd()); sys.exit(7)"), 0,
+    )
     finished = wait_for(console, "beta", other["id"])
     assert finished["status"] == "failed"
     assert finished["exit_code"] == 7
@@ -116,6 +129,7 @@ def test_commands_run_in_parallel_across_workspaces_and_reject_overlap(console, 
     assert console.get_run("alpha", active["id"])["status"] == "interrupted"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal escalation test")
 def test_stop_escalates_for_children_that_ignore_termination(console, tmp_path):
     tab = console.create_tab("alpha", "Child process")
     run = console.start(
@@ -166,11 +180,11 @@ def test_command_api_requires_confirmation_and_scopes_history(console, tmp_path)
 
     assert client.post(
         f"/api/commands/tabs/{tab['id']}/runs?workspace_id=alpha",
-        json={"command": "printf api", "confirmed": False},
+        json={"command": python_command("print('api', end='')"), "confirmed": False},
     ).status_code == 422
     response = client.post(
         f"/api/commands/tabs/{tab['id']}/runs?workspace_id=alpha",
-        json={"command": "printf api", "confirmed": True},
+        json={"command": python_command("print('api', end='')"), "confirmed": True},
     )
     assert response.status_code == 202
     run_id = response.json()["id"]
@@ -203,6 +217,55 @@ def test_command_console_ui_is_served():
     assert 'role="tablist" aria-label="Command tabs"' in page
     assert 'id="command-output-text"' in page
     assert 'src="/assets/command-console.js"' in page
+    assert "Bash on macOS and Linux or cmd.exe on Windows" in page
+    commands = page.split('id="commands-panel"', 1)[1].split('<section class="hero"', 1)[0]
+    assert "Workspace command center" not in commands
+    assert '<summary>How commands run</summary>' in commands
+    assert commands.index('id="command-refresh"') < commands.index('id="command-tab-content"')
+    assert "Unable to reach Switchyard" in script
     assert 'window.addEventListener("workspacechange"' in script
     assert "command-workspace-chip" in css
     assert TestClient(app).get("/api/commands/status").status_code == 403
+
+
+def test_command_shell_argv_is_native(monkeypatch):
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    assert command_argv("npm test", windows=True) == [
+        r"C:\Windows\System32\cmd.exe", "/d", "/s", "/c", "npm test"
+    ]
+    monkeypatch.setattr(
+        "ninerouter_orchestrator.command_console.find_tool", lambda name: "/bin/bash"
+    )
+    assert command_argv("npm test", windows=False) == [
+        "/bin/bash", "--noprofile", "--norc", "-c", "npm test"
+    ]
+
+
+def test_missing_shell_records_failure(console, tmp_path, monkeypatch):
+    def missing_shell(*args):
+        raise OSError("Shell not found")
+
+    monkeypatch.setattr("ninerouter_orchestrator.command_console.command_argv", missing_shell)
+    tab = console.create_tab("alpha", "Tests")
+    run = console.start("alpha", tab["id"], tmp_path, "echo example", 0)
+    assert run["status"] == "failed"
+    assert "Shell not found" in run["output"]
+    assert not console.running
+
+
+def test_completed_shell_cleans_up_background_children(console, tmp_path):
+    script = tmp_path / "parent with spaces.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-u', '-c', "
+        "\"import time; print('child-ready', flush=True); time.sleep(30)\"], "
+        "stdout=subprocess.PIPE)\n"
+        "print(child.stdout.readline().decode().strip(), flush=True)\n",
+        encoding="utf-8",
+    )
+    tab = console.create_tab("alpha", "Background")
+    run = console.start("alpha", tab["id"], tmp_path, format_command([sys.executable, str(script)]), 0)
+    finished = wait_for(console, "alpha", run["id"])
+    assert finished["status"] == "completed"
+    assert "child-ready" in finished["output"]
+    assert not console.running

@@ -37,6 +37,8 @@ class JobStore:
             "updated_at": now(),
             "result": None,
             "error": None,
+            "revision": 1,
+            "activity": [],
         }
         with self.lock:
             jobs = self._read()
@@ -49,7 +51,15 @@ class JobStore:
             jobs = self._read()
             for job in jobs:
                 if job["id"] == job_id:
-                    job.update(changes, updated_at=now())
+                    timestamp = now()
+                    revision = job.get("revision", 0) + 1
+                    if changes.get("stage") and changes["stage"] != job.get("stage"):
+                        activity = job.get("activity", [])
+                        activity.append({
+                            "id": revision, "at": timestamp, "message": changes["stage"],
+                        })
+                        job["activity"] = activity[-200:]
+                    job.update(changes, updated_at=timestamp, revision=revision)
                     self._write(jobs)
                     return job
         raise KeyError(job_id)

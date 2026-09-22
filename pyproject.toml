@@ -26,6 +26,11 @@ dependencies = [
   "uvicorn[standard]>=0.34,<1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/hharera/ai-switchyard"
+Repository = "https://github.com/hharera/ai-switchyard.git"
+Issues = "https://github.com/hharera/ai-switchyard/issues"
+
 [project.optional-dependencies]
 dev = [
   "httpx>=0.27,<1",

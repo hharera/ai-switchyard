@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 import socket
@@ -13,15 +15,16 @@ from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .adapters.codex import CodexAdapter
 from .adapters.nine_router import NineRouterReasoner
 from .chat import ChatRequest
 from .chat_history import ChatHistory
+from .chat_import import MAX_IMPORT_BYTES, parse_export
 from .cli_config import CliConfigStore, CliConfiguration, CliProfile
 from .cli_setup import setup_for
 from .combo_registry import ComboRegistry
@@ -29,12 +32,14 @@ from .command_api import command_router
 from .command_console import CommandConsole
 from .config import Settings
 from .delivery_config import DeliveryConfig, DeliveryConfigStore
+from .git import GitRepository
 from .git_view import Comparison, GitAction, GitReview
 from .job_store import JobStore
 from .mcp_catalog import mcp_catalog
 from .mcp_config import McpConfigStore, McpConfiguration, McpTool
 from .orchestrator import EngineeringOrchestrator
 from .process import ProcessError, find_tool, run_process
+from .repository_defaults import repository_defaults
 from .workflow_config import (
     StepCatalog,
     WorkflowCollection,
@@ -79,6 +84,17 @@ class FolderBrowseRequest(BaseModel):
     path: str = ""
 
 
+class ChatImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    workspace_id: str = Field(min_length=1, max_length=120)
+    source_name: str = Field(min_length=1, max_length=80)
+    export: dict | list
+    confirmed: bool = False
+    selected: list[int] = Field(default_factory=list, max_length=1000)
+    repository: str | None = None
+
+
 class GitActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -96,6 +112,15 @@ class GitActionRequest(BaseModel):
     include_untracked: bool = False
     amend: bool = False
     reset_mode: Literal["soft", "mixed", "hard"] = "mixed"
+    confirmed: bool = False
+
+
+class WorktreeActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    path: str = Field(min_length=1, max_length=4096)
+    action: Literal["remove", "protect", "unprotect"]
     confirmed: bool = False
 
 
@@ -127,6 +152,18 @@ def browse_repository_folders(request: FolderBrowseRequest) -> dict:
         raise HTTPException(403, "This folder cannot be read. Choose another folder.") from exc
     except (OSError, ValueError, RuntimeError) as exc:
         raise HTTPException(422, "Cannot read this folder. Check the path and try again.") from exc
+
+
+@app.post("/api/repository/git-defaults")
+def get_repository_defaults(request: FolderBrowseRequest) -> dict:
+    try:
+        return repository_defaults(request.path)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Choose an existing repository folder.") from exc
+    except PermissionError as exc:
+        raise HTTPException(403, "This folder cannot be read. Choose another folder.") from exc
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/repository/pick")
@@ -248,9 +285,72 @@ def git_action(request: GitActionRequest) -> dict:
         git_lock.release()
 
 
+def _managed_worktrees(workspace: Workspace) -> tuple[GitRepository, Path, list[dict]]:
+    repository = GitRepository(Path(workspace.repository))
+    state_dir = Settings().state_dir(repository.root)
+    return repository, state_dir, repository.managed_worktrees(state_dir)
+
+
+@app.get("/api/worktrees")
+def worktrees(workspace_id: str) -> dict:
+    try:
+        workspace = _workspace(workspace_id)
+        _, state_dir, entries = _managed_worktrees(workspace)
+        return {
+            "workspace_id": workspace.id,
+            "repository": workspace.repository,
+            "state_dir": str(state_dir),
+            "busy": dispatch_lock.locked(),
+            "summary": {
+                "total": len(entries),
+                "changed": sum(bool(item["changed_files"]) for item in entries),
+                "protected": sum(item["locked"] for item in entries),
+                "missing": sum(not item["exists"] for item in entries),
+            },
+            "worktrees": entries,
+        }
+    except (ProcessError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/worktrees/action")
+def worktree_action(request: WorktreeActionRequest) -> dict:
+    if request.action == "remove" and not request.confirmed:
+        raise HTTPException(422, "Confirm worktree removal before continuing.")
+    if not dispatch_lock.acquire(blocking=False):
+        raise HTTPException(409, "A workflow is running. Manage worktrees after it finishes.")
+    if not git_lock.acquire(blocking=False):
+        dispatch_lock.release()
+        raise HTTPException(409, "Another Git operation is running. Wait for it to finish.")
+    try:
+        workspace = _workspace(request.workspace_id)
+        repository, _, entries = _managed_worktrees(workspace)
+        target = Path(request.path).resolve()
+        entry = next((item for item in entries if Path(item["path"]) == target), None)
+        if entry is None:
+            raise ProcessError("Worktree is not managed by this workspace. Refresh the list.")
+        if request.action == "remove":
+            if not entry["removable"]:
+                raise ProcessError(
+                    "Only clean, unlocked worktrees on a branch can be removed. "
+                    "Preserve local files (including ignored files) and unlock before retrying."
+                )
+            removed, reason = repository.remove_worktree(target, preserve_ignored=True)
+            if not removed:
+                raise ProcessError(reason or "Git could not remove the worktree")
+        else:
+            repository.set_worktree_lock(target, locked=request.action == "protect")
+        return {"action": request.action, "path": str(target)}
+    except (ProcessError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        git_lock.release()
+        dispatch_lock.release()
+
+
 @app.middleware("http")
 async def local_only(request: Request, call_next):
-    if request.method not in {"GET", "HEAD", "OPTIONS"} or request.url.path.startswith(("/api/git/", "/api/chat/history", "/api/commands")):
+    if request.method not in {"GET", "HEAD", "OPTIONS"} or request.url.path.startswith(("/api/git/", "/api/worktrees", "/api/chat/history", "/api/commands")):
         origin = request.headers.get("origin")
         expected = f"{request.url.scheme}://{request.headers.get('host')}"
         if (origin and origin != expected) or request.headers.get(
@@ -348,7 +448,8 @@ def list_chat_history(workspace_id: str) -> dict:
     for tool in cli_store.get().tools:
         if tool.id not in supported:
             sources.append({"id": tool.id, "name": tool.name, "count": 0,
-                            "status": "unsupported", "detail": "Local history adapter not available yet."})
+                            "status": "unsupported",
+                            "detail": "Automatic history is not connected. Use Import chats with a JSON export."})
     return {"repository": str(repository), "conversations": [entry.summary() for entry in entries],
             "sources": sources}
 
@@ -364,6 +465,45 @@ def get_chat_history(conversation_id: str, workspace_id: str) -> dict:
         return chat_history.messages(entry)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
         raise HTTPException(503, "Cannot read this conversation. Refresh after the tool finishes writing.") from exc
+
+
+@app.post("/api/chat/history/import")
+async def import_chat_history(request: Request) -> dict:
+    content = bytearray()
+    async for chunk in request.stream():
+        if len(content) + len(chunk) > MAX_IMPORT_BYTES:
+            raise HTTPException(413, "Choose a JSON export smaller than 8 MB.")
+        content.extend(chunk)
+    try:
+        payload = ChatImportRequest.model_validate_json(content)
+        source_name = payload.source_name.strip()
+        if not source_name or any(ord(char) < 32 for char in source_name):
+            raise ValueError("Enter the name of the tool that created this export.")
+        repository = Path(_workspace(payload.workspace_id).repository).resolve()
+        conversations = await asyncio.to_thread(parse_export, payload.export)
+        if not payload.confirmed:
+            return {"repository": str(repository), "conversations": [
+                {"index": item["index"], "title": item["title"], "messages": len(item["messages"])}
+                for item in conversations
+            ]}
+        if payload.repository != str(repository):
+            raise ValueError("The workspace path changed. Review the export again before importing.")
+        selected = set(payload.selected)
+        if not selected or not selected.issubset({item["index"] for item in conversations}):
+            raise ValueError("Select the conversations that belong to this workspace.")
+        count = await asyncio.to_thread(
+            chat_history.save_imports, repository, source_name,
+            [item for item in conversations if item["index"] in selected],
+        )
+        return {"imported": count, "repository": str(repository), "selected": len(selected)}
+    except ValidationError as exc:
+        raise HTTPException(422, "Check the workspace, tool name, and JSON export, then retry.") from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, "Cannot import this export. " + str(exc)) from exc
+    except (KeyError, AttributeError, RecursionError) as exc:
+        raise HTTPException(422, "This JSON structure is not supported. Use the example export format.") from exc
+    except OSError as exc:
+        raise HTTPException(503, "Cannot save imported chats. Check local storage and retry.") from exc
 
 
 @app.post("/api/chat")
@@ -471,7 +611,12 @@ def _workspace_repository(path: Path, base_branch: str) -> None:
     if result.passed:
         repository_root = Path(result.stdout.strip()).resolve()
         if repository_root != root:
-            raise ProcessError("Choose the root folder of the existing Git repository.")
+            run_process(
+                ["git", "init", "--initial-branch", base_branch],
+                cwd=root,
+                timeout=30,
+                check=True,
+            )
         return
 
     # Do not replace a broken or inaccessible repository with a new one.
@@ -670,6 +815,40 @@ def job(job_id: str) -> dict:
     return found
 
 
+@app.get("/api/jobs/{job_id}/events")
+async def job_events(job_id: str, request: Request) -> StreamingResponse:
+    job_store = store
+    if not await asyncio.to_thread(job_store.get, job_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    async def stream():
+        previous = None
+        idle_ticks = 0
+        while not await request.is_disconnected():
+            found = await asyncio.to_thread(job_store.get, job_id)
+            if not found:
+                yield "event: unavailable\ndata: {}\n\n"
+                return
+            snapshot = json.dumps(found, separators=(",", ":"))
+            if snapshot != previous:
+                yield f"event: job\ndata: {snapshot}\n\n"
+                previous = snapshot
+                idle_ticks = 0
+                if found.get("status") not in {"queued", "running"}:
+                    return
+            idle_ticks += 1
+            if idle_ticks >= 30:
+                yield ": keep-alive\n\n"
+                idle_ticks = 0
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/jobs", status_code=202)
 def create_job(payload: JobRequest) -> dict:
     workspace: Workspace | None = None
@@ -713,10 +892,6 @@ def create_job(payload: JobRequest) -> dict:
         raise HTTPException(status_code=422, detail="Choose an existing workflow") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if not dispatch_lock.acquire(blocking=False):
-        raise HTTPException(
-            status_code=409, detail="A dispatch is already active. Wait for it to finish."
-        )
     delivery = payload.delivery or (workspace.delivery if workspace else delivery_store.get())
     created = store.create(
         repository=str(repository),
@@ -758,6 +933,8 @@ def create_job(payload: JobRequest) -> dict:
 def _work(
     job_id: str, payload: JobRequest, repository: Path, run_settings: dict | None = None
 ) -> None:
+    # Keep repository mutations serialized, but let callers queue work instead of rejecting it.
+    dispatch_lock.acquire()
     try:
         store.update(job_id, status="running", stage="Preparing Git and checking providers")
         run_settings = run_settings or {}
@@ -770,8 +947,14 @@ def _work(
         workflow = WorkflowRecipe.model_validate(store.get(job_id)["workflow"])
         mcp_config = McpConfiguration.model_validate(store.get(job_id).get("mcp_config", {}))
         cli_config = CliConfiguration.model_validate(store.get(job_id).get("cli_config", {}))
+        def progress(stage: str, result: dict | None) -> None:
+            changes = {"stage": stage}
+            if result is not None:
+                changes["result"] = result
+            store.update(job_id, **changes)
+
         orchestrator = EngineeringOrchestrator(
-            repository, settings, workflow, mcp_config, cli_config
+            repository, settings, workflow, mcp_config, cli_config, progress
         )
         store.update(job_id, stage="Running isolated candidates through 9router")
         result = orchestrator.run(payload.request)
@@ -795,7 +978,10 @@ def _work(
         else:
             result["delivery"] = {"status": "skipped", "reason": "Final review not approved"}
             orchestrator.save_run(result)
-        store.update(job_id, status=status, stage="Finished", result=result)
+        store.update(
+            job_id, status=status, stage="Stopped" if status == "failed" else "Finished",
+            result=result, error=result.get("error"),
+        )
     except Exception as exc:  # noqa: BLE001 - background failures must be persisted.
         store.update(job_id, status="failed", stage="Stopped", error=str(exc))
     finally:

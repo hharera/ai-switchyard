@@ -229,7 +229,8 @@ def test_chat_workspace_layout_preserves_controls_and_privacy():
     css = client.get("/assets/chat.css")
     assert css.status_code == 200
     assert 'href="/assets/chat.css"' in page
-    assert 'id="chat-workspace" data-workspace-selector' in page
+    assert 'id="chat-workspace"' not in page
+    assert 'id="active-workspace" data-workspace-selector' in page
     assert '<label class="chat-sr-only" for="chat-input">Message</label>' in page
     assert '<details class="chat-session-details">' in page
     assert '<summary>Session &amp; privacy</summary>' in page

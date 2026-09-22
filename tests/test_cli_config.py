@@ -225,3 +225,7 @@ def test_cli_tab_is_served():
     assert 'id="cli-setup-dialog"' in page
     assert "AI tool catalog" in page
     assert "Detection does not confirm authentication" in page
+    assert '<details class="cli-card integrated-cli-card" data-cli="codex">' in page
+    assert '<details class="cli-card integrated-cli-card" data-cli="opencode">' in page
+    assert '<details class="cli-card integrated-cli-card" data-cli="codex" open>' not in page
+    assert '<details class="cli-card integrated-cli-card" data-cli="opencode" open>' not in page

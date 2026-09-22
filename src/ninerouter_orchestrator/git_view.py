@@ -53,7 +53,9 @@ class GitReview:
             raise ProcessError("Choose an existing repository directory.")
         result = self.git("rev-parse", "--show-toplevel", check=False)[0].strip()
         if not result or Path(result).resolve() != self.root:
-            raise ProcessError("Choose the root folder of a Git repository.")
+            raise ProcessError(
+                "This workspace is not an independent repository. Save it in Workspaces first."
+            )
 
     def git(
         self, *args: str, check: bool = True, limit: int = 4_000_000, timeout: int = 30

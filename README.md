@@ -6,15 +6,14 @@ installs the engine, and exposes the `switchyard` command.
 
 ## Public installation
 
-Public npm publication is prepared but intentionally blocked until the release owner chooses an npm
-name/scope, source repository URL, and distribution license. The unscoped `switchyard` name belongs
-to another project. Run `npm run release:check` to see the outstanding owner decisions; publication
-cannot proceed accidentally while the package is still named `switchyard` and marked `UNLICENSED`.
+Public npm publication is prepared under the `ai-switchyard` package name but remains blocked until
+the release owner chooses a distribution license. Run `npm run release:check` to see the outstanding
+owner decision; publication cannot proceed accidentally while the package is marked `UNLICENSED`.
 
 After those fields are set and the package is published, installation is the same on every platform:
 
 ```bash
-npm install --global <owned-package-name>
+npm install --global ai-switchyard
 switchyard --help
 switchyard ui
 ```
@@ -33,7 +32,7 @@ Installation needs network access to download Python dependencies from PyPI.
 If npm lifecycle scripts were disabled, enable them and rebuild the installed package:
 
 ```bash
-npm rebuild --global <owned-package-name>
+npm rebuild --global ai-switchyard
 ```
 
 Windows validation commands run through `cmd.exe`; macOS and Linux use Bash when available, with
@@ -44,10 +43,11 @@ On Windows, agent prompts bypass recognized npm Node.js `.cmd` shims so prompt t
 interpreted as shell syntax. For other batch wrappers, configure the tool's native executable or
 an explicit command such as `["node.exe", "C:\\tools\\agent\\cli.js"]` in CLI settings.
 
-The **CMD** tab currently requires macOS or Linux with Bash; its process supervisor does not yet
-support Windows. This does not prevent Windows installation, MCP configuration/export, or CLI
-workflow validation. External tools must separately support the host OS and be installed and
-authenticated before use. Use a Windows-compatible validation command in Windows workspaces.
+The **CMD** tab uses `cmd.exe` on Windows and Bash on macOS or Linux. Commands and external tools
+must support the host OS and be installed and authenticated before use. Windows commands run in
+an owned Job Object; stopping a command forcibly terminates its entire process tree. macOS and
+Linux send a termination signal, then force termination after one second if needed. These are
+cleanup mechanisms, not security sandboxes. Keep long-running servers in the foreground.
 
 Switchyard stores global configuration in the platform-native data directory:
 
@@ -71,7 +71,7 @@ Or build and install a portable npm tarball:
 
 ```bash
 npm pack
-npm install -g ./switchyard-0.1.0.tgz
+npm install -g ./ai-switchyard-0.1.0.tgz
 ```
 
 Existing `orchestrate` and `orchestrate-ui` Python commands remain available for compatibility.
@@ -81,16 +81,15 @@ inspects the distributable without publishing it. Package contents exclude local
 credentials, tests, and Python bytecode.
 
 Cross-platform CI runs the Python suite, Node package tests, and a real packed global-install smoke
-test on Windows, macOS, and Linux with Python 3.12 and 3.13. POSIX-only CMD execution tests are
-skipped on Windows; installation checks run on all three platforms. Native Windows/macOS results
-must be confirmed in CI before claiming those platforms are verified.
+test on Windows, macOS, and Linux with Python 3.12 and 3.13. Native Windows/macOS results must be
+confirmed in CI before claiming those platforms are verified.
 
 ## Publishing a release
 
-1. Choose an npm name/scope you control and set `package.json` `name`. The command remains
-   `switchyard` even if the package is scoped.
+1. Verify that the `ai-switchyard` npm name is still available and that you have the right to use it.
+   The installed command remains `switchyard`.
 2. Choose a distribution license, add its `LICENSE` file, and set the npm and Python license
-   metadata consistently. Set `package.json` `repository.url` to the real public GitHub repository.
+   metadata consistently.
 3. Keep versions in `package.json` and `pyproject.toml` equal. Run `npm test`,
    `npm run test:install`, and `npm run release:check` before releasing.
 4. Configure the repository secret `NPM_TOKEN` with permission to publish the chosen package.
@@ -115,7 +114,8 @@ Dispatch can override workflow and delivery for one run. Each job records a work
 run-settings snapshot, so later edits do not change existing jobs. Host execution always needs fresh
 confirmation. Runs filters by workspace and includes older jobs with the same repository path.
 Removing a workspace only removes its configuration, never repository files or run history.
-Workflow templates, MCPs, and CLI access remain global.
+Workflows, step templates, MCPs, and CLI access are shared across all workspaces. A workspace's
+default workflow is only a reference to the shared library, never a workspace-owned copy.
 
 Saving a workspace initializes Git if its folder is not already a repository, using the configured
 Git comparison base as the initial branch. Saving alone does not stage or commit files.
@@ -123,7 +123,9 @@ At the start of every authorized dispatch (UI or CLI), Switchyard initializes Gi
 and, when there are no commits, commits the existing non-ignored files as a baseline. Empty
 folders receive an empty baseline commit. Review your ignore rules before the first dispatch:
 files not ignored by Git become part of local history. No remote is added or pushed by setup.
-For an existing repository, select its root folder; broken or nested repositories are rejected.
+If the selected folder is inside another repository, Switchyard initializes an independent nested
+repository so workspace history and changes remain scoped to the exact selected path. Broken or
+inaccessible repositories are rejected rather than overwritten.
 
 ## Delivery settings
 
@@ -212,8 +214,9 @@ host-execution confirmation.
 
 ## Workspace commands
 
-The **CMD** view provides workspace-scoped command tabs. Each tab runs one non-interactive Bash
-command at a time from the workspace root. Commands keep running while you switch views, tabs, or
+The **CMD** view provides workspace-scoped command tabs. Each tab runs one non-interactive command
+at a time from the workspace root (`cmd.exe` on Windows; Bash on macOS and Linux).
+Commands keep running while you switch views, tabs, or
 workspaces, and the interface shows live status for every workspace with active commands. Output,
 exit status, timestamps, and command history are stored locally in
 `commands.sqlite3` inside the platform data directory documented under Public installation.
@@ -225,11 +228,16 @@ SwitchYard server stops its active commands. Saved output is limited to the most
 characters per command.
 
 Dispatches may run without selecting a saved workflow, which uses Switchyard's built-in engineering
-steps with no saved template overrides. Selecting a named workflow uses its configured order, tools,
-prompts, and overrides. Every run records which path was chosen and keeps the resolved step snapshot.
+steps with no saved template overrides. Selecting a named workflow uses its configured phase
+templates, tools, prompts, and overrides. Every run records which path was chosen and keeps the
+resolved step snapshot.
+
+Create and edit **Workflows** without selecting a workspace, then choose any workspace at dispatch
+time. The workflow library is stored globally, not inside a repository. Saving a shared workflow
+updates future runs in every workspace that uses it; existing runs keep their snapshots.
 
 Select **Steps** to configure independent, reusable step templates. The catalog has no execution
-order; **Workflows** reference templates by ID and define their sequence, with optional per-workflow
+order; **Workflows** reference templates by ID and arrange the route, with optional per-workflow
 overrides that leave the shared template unchanged. Planning, execution, candidate selection,
 and final review can use the Codex subscription or any available stable `9router` combo. Each AI
 stage has its own system prompt. Validation and merge remain deterministic safety gates. Every
@@ -240,10 +248,14 @@ reported, and saved steps that reference a removed combo are flagged without bei
 Templates can be added independently. New workflows start with an empty route. Select **Edit
 workflow** to rename a saved workflow, add or remove templates, adjust overrides, and drag the
 step handles to change its order. Move-up/down buttons provide keyboard and touch alternatives.
-Save changes to persist the route, or discard all unsaved workflow edits. Empty and custom-order
-routes can be saved as drafts. Full dispatch currently requires plan, execute, validate, select,
-merge, and review in that order; unsupported routes are rejected before execution, never silently
-reordered.
+Each workflow can keep integration in an isolated worktree (the default) or apply selected candidate
+commits directly to the current branch of a clean repository checkout. Candidate attempts always use
+separate worktrees.
+Save changes to persist the route, or discard all unsaved workflow edits. Empty and partial routes
+can be saved as drafts. Full dispatch requires exactly one plan, execute, validate, select, merge,
+and review step. Complete workflows may arrange those steps freely in the editor; the engineering
+runner resolves their semantic dependencies when it executes them. Routes with a missing or repeated
+phase are rejected before execution.
 The field labeled system prompt is passed as stage instructions through the CLI task prompt;
 it does not replace the coding CLI's own system-level safety instructions.
 
@@ -332,8 +344,10 @@ workers and Postgres checkpoints are the next deployment step; Temporal remains 
 
 ## Safety boundaries
 
-- After the first-commit setup described above, the original checkout may contain local changes. Runs start from its committed `HEAD` in separate
-  worktrees and do not stage, stash, commit, or discard those local changes.
+- After the first-commit setup described above, workflows using the default isolated integration
+  worktree start from the original checkout's committed `HEAD` and do not stage, stash, commit, or
+  discard its local changes. Workflows configured without integration isolation require a clean,
+  attached checkout and apply selected commits to its current branch.
 - Each executor has its own worktree, but can access host files: this is NOT a security sandbox.
 - Executors are instructed not to merge or commit; host execution cannot enforce that instruction.
 - Planner and reviewer Codex calls use a read-only sandbox.

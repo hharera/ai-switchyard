@@ -1,3 +1,5 @@
+import copy
+
 import pytest
 
 from ninerouter_orchestrator.adapters.codex import strict_schema
@@ -44,8 +46,10 @@ def test_run_preserves_dirty_checkout(monkeypatch, tmp_path):
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     run_process(["git", "init"], cwd=repo_path, timeout=30, check=True)
+    progress = []
     orchestrator = EngineeringOrchestrator(
-        repo_path, Settings(allow_host_execution=True, forks_per_ticket=1)
+        repo_path, Settings(allow_host_execution=True, forks_per_ticket=1),
+        progress=lambda stage, result: progress.append((stage, copy.deepcopy(result))),
     )
     repo = orchestrator.repository
     sample = repo_path / "sample.txt"
@@ -71,6 +75,7 @@ def test_run_preserves_dirty_checkout(monkeypatch, tmp_path):
     monkeypatch.setattr(orchestrator, "plan", lambda request: plan)
 
     def execute(request):
+        assert any(stage == "Implementation plan ready" for stage, _ in progress)
         assert request.workspace != repo_path
         assert (request.workspace / "sample.txt").read_text() == "base"
         assert not (request.workspace / "untracked.txt").exists()
@@ -90,6 +95,14 @@ def test_run_preserves_dirty_checkout(monkeypatch, tmp_path):
     result = orchestrator.run("Update sample")
 
     assert result["status"] == "approved"
+    stages = [stage for stage, _ in progress]
+    assert "T1: candidate 1 started" in stages
+    assert "T1: validating candidate 1" in stages
+    assert "Selecting the best candidate for T1" in stages
+    assert "Integrating T1 and running checks" in stages
+    assert "Integrated T1" in stages
+    assert "Reviewing the integrated changes" in stages
+    assert progress[-1][1]["review"]["approved"] is True
     assert result["base"] == base
     assert repo.git("show", f"{result['integration_branch']}:sample.txt").stdout == "candidate"
     assert repo.head() == base
@@ -179,14 +192,17 @@ def test_dispatch_does_not_touch_existing_history_or_local_changes(tmp_path):
     assert repo.git("status", "--porcelain").stdout == status
 
 
-def test_dispatch_rejects_nested_repository_folder(tmp_path):
+def test_dispatch_initializes_nested_repository_folder(tmp_path):
     repo_path = tmp_path / "repo"
     nested = repo_path / "nested"
     nested.mkdir(parents=True)
     run_process(["git", "init"], cwd=repo_path, timeout=30, check=True)
 
-    with pytest.raises(ProcessError, match="root folder"):
-        GitRepository(nested).prepare_dispatch()
+    setup = GitRepository(nested).prepare_dispatch()
+
+    assert setup["initialized"] is True
+    assert setup["baseline_commit"]
+    assert (nested / ".git").is_dir()
 
 
 @pytest.mark.parametrize("existing_git", [False, True])

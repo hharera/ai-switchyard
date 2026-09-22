@@ -1,4 +1,5 @@
 import subprocess
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -113,13 +114,53 @@ def test_cross_origin_dispatch_is_rejected():
     assert response.status_code == 403
 
 
+def test_completed_job_stream_sends_latest_snapshot_and_closes(monkeypatch, tmp_path):
+    job_store = JobStore(tmp_path / "jobs.json")
+    monkeypatch.setattr(web, "store", job_store)
+    created = job_store.create(repository=str(tmp_path), request="Stream progress", workflow={})
+    job_store.update(created["id"], status="completed", stage="Finished", result={"ok": True})
+
+    response = client.get(f"/api/jobs/{created['id']}/events")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: job" in response.text
+    assert '"status":"completed"' in response.text
+    assert '"stage":"Finished"' in response.text
+
+
+def test_job_store_records_ordered_activity(tmp_path):
+    job_store = JobStore(tmp_path / "jobs.json")
+    created = job_store.create(repository=str(tmp_path), request="Track stages", workflow={})
+
+    job_store.update(created["id"], stage="Planning the implementation")
+    updated = job_store.update(created["id"], stage="Running candidates for T1")
+
+    assert updated["revision"] == 3
+    assert [item["message"] for item in updated["activity"]] == [
+        "Planning the implementation", "Running candidates for T1",
+    ]
+
+
 def test_home_page_loads():
     response = client.get("/")
+    script = client.get("/assets/app.js").text
     assert response.status_code == 200
     assert "9router Switchyard" in response.text
+    assert '<a class="sidebar-logo" href="#overview"><span class="brand-mark" aria-hidden="true"><img src="/assets/favicon.svg" alt="" width="34" height="34"></span><span>SwitchYard</span></a>' in response.text
     assert "Dispatch a change" in response.text
-    assert "Scope: all repositories" in response.text
-    assert "Shared MCP servers" in response.text
+    assert "Scope and safety" in response.text
+    assert "MCP servers" in response.text
+    mcps = response.text.split('id="mcps-panel"', 1)[1].split('id="clis-panel"', 1)[0]
+    assert "Global tool connections" not in mcps
+    assert "Scope: all repositories" not in mcps
+    assert "Only add trusted servers" in mcps
+    assert '<details class="configuration-note">' in mcps
+    assert 'shared: "Shared servers"' in script
+    assert 'class="mcp-tool mcp-overrides"' in script
+    assert "Use this list for connections both runtimes should receive" not in script
+    assert "No overrides for this tool" not in script
+    assert 'mcpForm.addEventListener("invalid"' in script
     assert "AI runtimes and tools" in response.text
     assert 'class="run-drawer"' in response.text
     assert '<dialog id="run-dialog">' not in response.text
@@ -147,8 +188,14 @@ def test_template_catalog_is_not_a_workflow_sequence():
     assert '<ul class="step-catalog" id="step-catalog"' in page
     assert "No execution order here" in page
     assert '<li class="template-card"' in script
+    assert 'class="template-heading"' in script
+    assert 'class="template-fields"' in script
+    assert 'class="template-footer"' in script
+    assert 'id="template-count"' in page
     assert ">Step type</label>" in script
     assert "Determines compatible workflow phases, not a template order." in script
+    assert 'title: "Remove template?"' in script
+    assert "Replace those references and save the workflows" in script
     assert 'class="workflow-step"' not in script
     assert "route-step" not in css
     assert 'class="phase-number"' in script  # Sequence belongs to workflow bindings.
@@ -171,6 +218,8 @@ def test_workflow_editor_starts_empty_and_new_workflows_are_unassigned():
     page = client.get("/").text
     script = client.get("/assets/app.js").text
     assert "Build a workflow" in page
+    assert "Shared across all workspaces" in page
+    assert "No workspace is needed to create or edit a workflow" in page
     assert "How to build a workflow" in page
     assert "Workflow to edit" in page
     assert "New workflow" in page
@@ -179,7 +228,7 @@ def test_workflow_editor_starts_empty_and_new_workflows_are_unassigned():
     assert "selectedWorkflowId = null" in script
     assert "Choose where to start" in script
     assert "Create workflow" in script
-    assert 'name: "", steps' in script
+    assert 'name: "", isolated_worktree: true, steps' in script
     assert 'const steps = [];' in script
     assert "Unsaved empty workflow" in script
     assert 'draggable="true"' in script
@@ -190,14 +239,18 @@ def test_workflow_editor_starts_empty_and_new_workflows_are_unassigned():
     assert "drop-ready" in script
 
 
-def test_dispatch_can_run_with_or_without_a_saved_workflow(monkeypatch, tmp_path):
-    class ImmediateApprovalLock:
-        def acquire(self, blocking=False):
-            return True
+def test_active_workspace_is_global_sidebar_context():
+    page = client.get("/").text
+    script = client.get("/assets/app.js").text
+    assert 'class="sidebar-workspace" id="workspace-context"' in page
+    assert page.index('id="workspace-context"') < page.index('<nav class="side-nav">')
+    assert '"workspace-context":' not in script
+    assert 'workflows: ["Workflows", "Build shared pipelines that any workspace can use."]' in script
 
+
+def test_dispatch_can_run_with_or_without_a_saved_workflow(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "workflow_store", WorkflowStore(tmp_path / "workflow.json"))
     monkeypatch.setattr(web, "store", JobStore(tmp_path / "jobs.json"))
-    monkeypatch.setattr(web, "dispatch_lock", ImmediateApprovalLock())
     monkeypatch.setattr(web, "_work", lambda *args, **kwargs: None)
     config = web.workflow_store.get_config()
     config.workflows[0].steps[0].system_prompt = "Custom saved planning instructions."
@@ -253,6 +306,98 @@ def test_dispatch_can_run_with_or_without_a_saved_workflow(monkeypatch, tmp_path
     assert "Without a workflow - built-in steps" in page
     assert 'workflow_id: data.get("workflow_id") || null' in script
     assert "Built-in engineering steps" in script
+
+
+def test_dispatch_is_queued_while_another_dispatch_is_active(monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "workflow_store", WorkflowStore(tmp_path / "workflow.json"))
+    monkeypatch.setattr(web, "store", JobStore(tmp_path / "jobs.json"))
+    monkeypatch.setattr(web, "dispatch_lock", threading.Lock())
+    monkeypatch.setattr(web, "_work", lambda *args, **kwargs: None)
+    web.dispatch_lock.acquire()
+    try:
+        response = client.post("/api/jobs", json={
+            "repository": str(tmp_path), "request": "Queue this implementation",
+            "allow_host_execution": True,
+        })
+    finally:
+        web.dispatch_lock.release()
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_queued_dispatch_runs_after_active_dispatch_finishes(monkeypatch, tmp_path, fail_first):
+    monkeypatch.setattr(web, "workflow_store", WorkflowStore(tmp_path / "workflow.json"))
+    monkeypatch.setattr(web, "store", JobStore(tmp_path / "jobs.json"))
+    monkeypatch.setattr(web, "dispatch_lock", threading.Lock())
+    first_started = threading.Event()
+    finish_first = threading.Event()
+    second_started = threading.Event()
+    workers = []
+    work = web._work
+
+    def tracked_work(*args):
+        workers.append(threading.current_thread())
+        work(*args)
+
+    class Orchestrator:
+        def __init__(self, *args):
+            pass
+
+        def run(self, request):
+            if request == "First implementation":
+                first_started.set()
+                assert finish_first.wait(5)
+                if fail_first:
+                    raise RuntimeError("First run failed")
+            else:
+                second_started.set()
+            return {"status": "needs_repair"}
+
+        def save_run(self, result):
+            pass
+
+    monkeypatch.setattr(web, "_work", tracked_work)
+    monkeypatch.setattr(web, "EngineeringOrchestrator", Orchestrator)
+    payload = {"repository": str(tmp_path), "allow_host_execution": True}
+    try:
+        first = client.post("/api/jobs", json={**payload, "request": "First implementation"})
+        assert first.status_code == 202
+        assert first_started.wait(5)
+        second = client.post("/api/jobs", json={**payload, "request": "Second implementation"})
+        assert second.status_code == 202
+        assert web.store.get(second.json()["id"])["status"] == "queued"
+        assert not second_started.is_set()
+    finally:
+        finish_first.set()
+        for worker in workers:
+            worker.join(5)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert second_started.is_set()
+    assert web.store.get(first.json()["id"])["status"] == (
+        "failed" if fail_first else "needs_repair"
+    )
+    assert web.store.get(second.json()["id"])["status"] == "needs_repair"
+    assert not web.dispatch_lock.locked()
+
+
+def test_dispatch_setup_failure_does_not_hold_execution_lock(monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "workflow_store", WorkflowStore(tmp_path / "workflow.json"))
+    monkeypatch.setattr(web, "store", JobStore(tmp_path / "jobs.json"))
+    monkeypatch.setattr(web, "dispatch_lock", threading.Lock())
+
+    def fail_create(**kwargs):
+        raise OSError("Cannot save job")
+
+    monkeypatch.setattr(web.store, "create", fail_create)
+    with pytest.raises(OSError, match="Cannot save job"):
+        client.post("/api/jobs", json={
+            "repository": str(tmp_path), "request": "Create implementation",
+            "allow_host_execution": True,
+        })
+    assert not web.dispatch_lock.locked()
 
 
 def test_job_requires_existing_repository():
@@ -321,7 +466,7 @@ def test_dispatch_rejects_plan_only_workflow(monkeypatch, tmp_path):
         "allow_host_execution": True,
     })
     assert response.status_code == 422
-    assert "runner currently requires" in response.json()["detail"]
+    assert "Add: execute, validate, select, merge, review" in response.json()["detail"]
     assert web.store.list() == []
 
 
@@ -377,25 +522,28 @@ def test_workflow_rejects_unavailable_override_combo(monkeypatch, tmp_path):
 
 def test_edit_workflow_persists_order_overrides_and_drafts(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "workflow_store", WorkflowStore(tmp_path / "workflow.json"))
+    monkeypatch.setattr(web, "_work", lambda *args, **kwargs: None)
     monkeypatch.setattr(web, "health", lambda: {"combos": [], "ready": True})
     config = client.get("/api/workflows").json()
     workflow = config["workflows"][0]
     workflow["name"] = "Edited workflow"
     workflow["steps"].reverse()
     workflow["steps"][0]["system_prompt"] = "Review security boundaries."
-    config["workflows"].append({"id": "draft", "name": "Empty draft", "steps": []})
+    config["workflows"].append({
+        "id": "draft", "name": "Empty draft", "isolated_worktree": False, "steps": [],
+    })
     payload = {key: config[key] for key in ("workflows", "default_workflow_id")}
     response = client.put("/api/workflows", json=payload)
     assert response.status_code == 200
     reopened = client.get("/api/workflows").json()
     assert reopened["workflows"] == payload["workflows"]
+    assert reopened["workflows"][1]["isolated_worktree"] is False
     assert reopened["steps"] == config["steps"]
-    blocked = client.post("/api/jobs", json={
+    dispatched = client.post("/api/jobs", json={
         "repository": str(tmp_path), "request": "Run the reordered workflow",
         "allow_host_execution": True, "workflow_id": workflow["id"],
     })
-    assert blocked.status_code == 422
-    assert "runner currently requires" in blocked.json()["detail"]
+    assert dispatched.status_code == 202
 
 
 def test_combo_refresh_reflects_registry(monkeypatch):

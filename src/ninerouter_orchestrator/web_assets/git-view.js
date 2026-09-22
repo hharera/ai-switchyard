@@ -15,7 +15,13 @@
   const patches = new Map();
   const drafts = new Map();
   let renderedWorkspace = null;
+  let reviewResizer = null;
   const confirmDialog = document.querySelector("#git-confirm");
+
+  function clearReviewResizer() {
+    reviewResizer?.destroy();
+    reviewResizer = null;
+  }
 
   function saveDrafts() {
     if (!renderedWorkspace) return;
@@ -90,6 +96,7 @@
     saveDrafts();
     const workspace = window.Workspaces?.active();
     if (!workspace) {
+      clearReviewResizer();
       content.innerHTML = '<div class="git-empty"><b>No workspace selected</b><a href="#workspaces">Add a workspace to manage its repository</a></div>';
       return;
     }
@@ -98,6 +105,7 @@
     refresh.disabled = true;
     errorBox.textContent = "";
     status.textContent = notice || "Reading repository status and changed files.";
+    clearReviewResizer();
     content.innerHTML = '<div class="git-empty git-loading"><b>Reading Git</b><span>Collecting branches, worktree status, and recent history.</span></div>';
     const params = new URLSearchParams({workspace_id: workspace.id, comparison: comparison()});
     if (comparison() === "branch" && baseInput.value.trim()) params.set("base", baseInput.value.trim());
@@ -127,6 +135,7 @@
   }
 
   function renderSnapshot(data) {
+    clearReviewResizer();
     const worktree = data.status_summary;
     const statusChips = [
       worktree.conflicted ? [worktree.conflicted, "conflicted", "danger"] : null,
@@ -165,6 +174,7 @@
       ${renderReview(data.files, data.comparison.kind !== "branch")}
     `;
     bindSnapshotEvents();
+    bindReviewResizer();
     restoreDrafts();
     const first = content.querySelector("details[data-git-path]");
     if (first) loadPatch(first);
@@ -286,14 +296,37 @@
       <div class="git-review-toolbar"><h3>Files changed <span>${files.length}</span></h3><div class="git-layout-toggle" role="group" aria-label="Diff layout"><button type="button" data-diff-layout="unified" aria-pressed="${diffLayout === "unified"}">Unified</button><button type="button" data-diff-layout="split" aria-pressed="${diffLayout === "split"}">Split</button></div></div>
       ${fileActions}
       <div class="git-review-layout">
-        <nav class="git-file-nav" aria-label="Changed files">
+        <nav class="git-file-nav" id="git-file-nav" aria-label="Changed files">
           <div class="git-file-nav-heading"><b>Changed files</b><span>${files.length}</span></div>
           <div class="git-file-filter"><label for="git-file-filter">Filter files</label><input id="git-file-filter" type="search" placeholder="Search paths" autocomplete="off"></div>
           <div class="git-file-list">${fileButtons}</div>
           <p id="git-filter-empty" class="field-note" role="status" hidden>No matching paths. Clear the filter to see all files.</p>
         </nav>
-        <div class="git-diff-list">${diffs}</div>
+        <div class="pane-resizer git-review-resizer" id="git-review-resizer" role="separator" aria-label="Resize changed files list" aria-controls="git-file-nav git-diff-list" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="640" aria-valuenow="280" tabindex="0" title="Drag to resize. Use arrow keys for precise control; double-click to reset."></div>
+        <div class="git-diff-list" id="git-diff-list">${diffs}</div>
       </div>`;
+  }
+
+  function bindReviewResizer() {
+    const layout = content.querySelector(".git-review-layout");
+    const handle = content.querySelector("#git-review-resizer");
+    if (!layout || !handle || !window.PaneResize) return;
+    const inlinePosition = event => {
+      const bounds = layout.getBoundingClientRect();
+      return getComputedStyle(document.documentElement).direction === "rtl"
+        ? bounds.right - event.clientX
+        : event.clientX - bounds.left;
+    };
+    reviewResizer = window.PaneResize.attach({
+      handle,
+      property: "--git-file-nav-width",
+      storage: "switchyard.git-file-nav-width",
+      minimum: 220,
+      maximum: () => Math.min(640, Math.max(220, layout.clientWidth - 480)),
+      initial: 280,
+      position: inlinePosition,
+      observe: layout,
+    });
   }
 
   function bindSnapshotEvents() {
@@ -317,6 +350,7 @@
         if (!row.hidden) visible++;
       });
       content.querySelector("#git-filter-empty").hidden = visible > 0;
+      updateSelectedCount();
     });
     content.querySelectorAll("[data-diff-layout]").forEach(button => {
       button.addEventListener("click", () => {
@@ -329,7 +363,7 @@
       });
     });
     content.querySelector("#git-select-all")?.addEventListener("change", event => {
-      content.querySelectorAll("[data-git-path-select]").forEach(input => { input.checked = event.target.checked; });
+      visibleFileSelections().forEach(input => { input.checked = event.target.checked; });
       updateSelectedCount();
     });
     content.querySelectorAll("[data-git-path-select]").forEach(input => input.addEventListener("change", updateSelectedCount));
@@ -339,15 +373,21 @@
     return [...content.querySelectorAll("[data-git-path-select]:checked")].map(input => input.value);
   }
 
+  function visibleFileSelections() {
+    return [...content.querySelectorAll("[data-git-path-select]")].filter(input => !input.closest(".git-file-row").hidden);
+  }
+
   function updateSelectedCount() {
     const selected = selectedPaths().length;
     const count = content.querySelector("#git-selected-count");
     if (count) count.textContent = `${selected} selected`;
     const all = content.querySelector("#git-select-all");
-    const total = content.querySelectorAll("[data-git-path-select]").length;
+    const visible = visibleFileSelections();
+    const visibleSelected = visible.filter(input => input.checked).length;
     if (all) {
-      all.checked = selected > 0 && selected === total;
-      all.indeterminate = selected > 0 && selected < total;
+      all.checked = visible.length > 0 && visibleSelected === visible.length;
+      all.indeterminate = visibleSelected > 0 && visibleSelected < visible.length;
+      all.disabled = visible.length === 0;
     }
   }
 

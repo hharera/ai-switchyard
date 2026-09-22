@@ -17,6 +17,7 @@ from ninerouter_orchestrator.workflow_config import (
 
 def test_default_recipe_has_required_pipeline():
     recipe = default_recipe()
+    assert recipe.isolated_worktree is True
     assert [step.kind for step in recipe.steps] == [
         "plan",
         "execute",
@@ -84,6 +85,7 @@ def test_workflows_reuse_templates_and_apply_overrides(tmp_path):
     second = WorkflowDefinition(
         id="security",
         name="Security workflow",
+        isolated_worktree=False,
         steps=[
             *[WorkflowStepBinding(step_id=step.id) for step in config.steps[:5]],
             WorkflowStepBinding(
@@ -97,6 +99,7 @@ def test_workflows_reuse_templates_and_apply_overrides(tmp_path):
         WorkflowCollection(workflows=[config.workflows[0], second], default_workflow_id="security")
     )
     resolved = store.get("security")
+    assert resolved.isolated_worktree is False
     assert resolved.step("plan").id == config.steps[0].id
     assert resolved.step("review").name == "Security review"
     assert resolved.step("review").engine == "9router/Kimi"
@@ -129,7 +132,15 @@ def test_empty_partial_and_reordered_workflows_round_trip(tmp_path):
     assert [step.model_dump() for step in reloaded.steps] == original_templates
     assert reloaded.resolve("empty").steps == []
     reloaded.resolve("partial").require_executable(plan_only=True)
-    with pytest.raises(ValueError, match="runner currently requires"):
-        reloaded.resolve().require_executable()
+    reloaded.resolve().require_executable()
+    with pytest.raises(ValueError, match="Add: execute, validate, select, merge, review"):
+        reloaded.resolve("partial").require_executable()
     with pytest.raises(ValueError, match="exactly one plan"):
         reloaded.resolve("empty").require_executable(plan_only=True)
+
+
+def test_full_dispatch_rejects_repeated_phase():
+    recipe = default_recipe()
+    recipe.steps.append(recipe.step("review").model_copy(update={"id": "second-review"}))
+    with pytest.raises(ValueError, match="remove repeated: review"):
+        recipe.require_executable()

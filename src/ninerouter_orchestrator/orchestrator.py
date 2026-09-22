@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -26,6 +28,8 @@ from .process import ProcessError, run_process
 from .validation import validate_candidate
 from .workflow_config import WorkflowRecipe, WorkflowStep, default_recipe
 
+logger = logging.getLogger(__name__)
+
 INTENTS = (
     ForkIntent.IMPLEMENTATION,
     ForkIntent.ROBUSTNESS,
@@ -41,6 +45,7 @@ class EngineeringOrchestrator:
         workflow: WorkflowRecipe | None = None,
         mcp_config: McpConfiguration | None = None,
         cli_config: CliConfiguration | None = None,
+        progress: Callable[[str, dict | None], None] | None = None,
     ) -> None:
         mcp_config = mcp_config or McpConfiguration()
         cli_config = cli_config or CliConfiguration()
@@ -72,6 +77,15 @@ class EngineeringOrchestrator:
         self.cli_tool_context = cli_config.agent_tool_prompt()
         self.workflow = workflow or default_recipe()
         self.state_dir = settings.state_dir(repository.resolve())
+        self.progress = progress
+
+    def _report(self, stage: str, run: dict | None = None) -> None:
+        if not self.progress:
+            return
+        try:
+            self.progress(stage, run)
+        except Exception:
+            logger.warning("Unable to publish workflow progress", exc_info=True)
 
     def preflight(self, *, plan_only: bool = False) -> None:
         self.workflow.require_executable(plan_only=plan_only)
@@ -157,13 +171,19 @@ Request:
                             error=str(exc),
                         )
                     )
+                self._report(
+                    f"{ticket.id}: candidate {request.fork_number} finished "
+                    f"({len(results)} of {len(requests)}): {results[-1].status}"
+                )
         return sorted(results, key=lambda result: result.request.fork_number)
 
     def _execute_fork(self, request: ExecutionRequest) -> ExecutionResult:
+        self._report(f"{request.ticket.id}: candidate {request.fork_number} started")
         if request.engine == "codex":
             output = self.planner.execute(self.executor._prompt(request), cwd=request.workspace)
         else:
             output = self.executor.execute(request)
+        self._report(f"{request.ticket.id}: validating candidate {request.fork_number}")
         validation = validate_candidate(
             self.repository,
             request.workspace,
@@ -275,19 +295,29 @@ Plan:
                 "Execution requires --allow-host-execution: worktrees are not sandboxes"
             )
         self.workflow.require_executable()
+        self._report("Preparing the repository")
         repository_setup = self.repository.prepare_dispatch()
+        integration_branch = None
+        if not self.workflow.isolated_worktree:
+            self.repository.require_clean_checkout()
+            integration_branch = self.repository.current_branch()
         run = self.create_run(request, plan_only=False)
         run["repository_setup"] = repository_setup
         plan = Plan.model_validate(run["plan"])
-        workspace, branch = self.repository.create_worktree(
-            state_dir=self.state_dir,
-            run_id=run["run_id"],
-            ticket_id="integration",
-            fork_number=0,
-            start_point=run["base"],
-        )
+        self._report("Implementation plan ready", run)
+        if self.workflow.isolated_worktree:
+            workspace, integration_branch = self.repository.create_worktree(
+                state_dir=self.state_dir,
+                run_id=run["run_id"],
+                ticket_id="integration",
+                fork_number=0,
+                start_point=run["base"],
+            )
+        else:
+            workspace = self.repository.root
         run.update(
-            integration_branch=branch,
+            integration_branch=integration_branch,
+            isolated_worktree=self.workflow.isolated_worktree,
             workspace=str(workspace),
             tickets=[],
             status="running",
@@ -295,10 +325,15 @@ Plan:
         )
         checks: list[str] = []
         try:
-            for ticket in plan.dependency_order():
+            ordered_tickets = plan.dependency_order()
+            for index, ticket in enumerate(ordered_tickets, start=1):
                 if not ticket.validation_commands:
                     raise RuntimeError(f"{ticket.id} needs explicit validation commands")
                 start = self.repository.git("rev-parse", "HEAD", cwd=workspace).stdout.strip()
+                self._report(
+                    f"Running candidates for {ticket.id} ({index} of {len(ordered_tickets)})",
+                    run,
+                )
                 results = self.execute_ticket(run["run_id"], ticket, start)
                 entry = {
                     "ticket": ticket.id,
@@ -306,6 +341,7 @@ Plan:
                 }
                 run["tickets"].append(entry)
                 self.save_run(run)
+                self._report(f"Selecting the best candidate for {ticket.id}", run)
                 decision = self.select_candidate(ticket, results)
                 selected = next(
                     (
@@ -320,6 +356,7 @@ Plan:
                 if selected is None:
                     raise RuntimeError("Reviewer selected an invalid candidate")
                 entry["decision"] = decision.model_dump()
+                self._report(f"Integrating {ticket.id} and running checks", run)
                 self.repository.git(
                     "-c",
                     "user.name=9router Orchestrator",
@@ -341,15 +378,20 @@ Plan:
                     raise RuntimeError(f"Integration checks failed after {ticket.id}")
                 self._cleanup_execution_worktrees(run, results)
                 self.save_run(run)
+                self._report(f"Integrated {ticket.id}", run)
+            self._report("Reviewing the integrated changes", run)
             review = self.review(request, plan, workspace, run["base"])
             run["review"] = review.model_dump(mode="json")
             run["status"] = (
                 "approved" if review.approved and not review.findings else "needs_repair"
             )
-            self._cleanup_worktree(run, workspace)
+            if self.workflow.isolated_worktree:
+                self._cleanup_worktree(run, workspace)
         except Exception as exc:  # noqa: BLE001 - persist every run failure.
             run.update(status="failed", error=str(exc))
+            self._report("Run stopped", run)
         self.save_run(run)
+        self._report("Run stopped" if run["status"] == "failed" else "Workflow finished", run)
         return run
 
     def _cleanup_execution_worktrees(self, run: dict, results: list[ExecutionResult]) -> None:
@@ -373,8 +415,10 @@ Plan:
         temporary.replace(path)
 
     def create_run(self, request: str, *, plan_only: bool = True) -> dict:
+        self._report("Checking providers")
         self.preflight(plan_only=plan_only)
         run_id = uuid.uuid4().hex[:10]
+        self._report("Planning the implementation")
         plan = self.plan(request)
         base = self.repository.head()
         run = {

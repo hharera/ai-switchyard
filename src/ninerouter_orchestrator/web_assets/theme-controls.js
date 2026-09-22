@@ -18,11 +18,19 @@
   }
 
   function syncSelect(state) {
+    if (!state) return;
     const {select, button} = state;
     const selected = select.selectedOptions[0];
     button.querySelector("span").textContent = selected?.textContent || "Choose an option";
     button.disabled = select.disabled;
     button.classList.toggle("placeholder", !select.value);
+  }
+
+  function refreshSelect(select) {
+    const state = selectState.get(select);
+    if (!state) return;
+    syncSelect(state);
+    if (state.wrapper.classList.contains("open")) renderSelectOptions(state);
   }
 
   function renderSelectOptions(state) {
@@ -123,8 +131,8 @@
         event.preventDefault(); closeSelect(state, true);
       }
     });
-    select.addEventListener("change", () => syncSelect(state));
-    new MutationObserver(() => syncSelect(state)).observe(select, {attributes: true, childList: true, subtree: true});
+    select.addEventListener("change", () => refreshSelect(select));
+    new MutationObserver(() => refreshSelect(select)).observe(select, {attributes: true, childList: true, subtree: true});
     if (select.id) {
       document.querySelectorAll(`label[for="${CSS.escape(select.id)}"]`).forEach(label => label.addEventListener("click", event => {
         event.preventDefault(); button.focus();
@@ -298,5 +306,5 @@
     if (node instanceof HTMLElement) enhance(node);
   }))).observe(document.body, {childList: true, subtree: true});
 
-  window.ThemeControls = {confirm: confirmAction, validateForm};
+  window.ThemeControls = {confirm: confirmAction, validateForm, refreshSelect};
 })();

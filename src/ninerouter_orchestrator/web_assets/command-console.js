@@ -23,9 +23,14 @@
   }
   async function api(path, options = {}, id = workspace?.id) {
     const separator = path.includes("?") ? "&" : "?";
-    const response = await fetch(`/api/commands${path}${id ? `${separator}workspace_id=${encodeURIComponent(id)}` : ""}`, {
-      ...options, headers: {"Content-Type": "application/json", "X-Switchyard-Client": "local-ui"},
-    });
+    let response;
+    try {
+      response = await fetch(`/api/commands${path}${id ? `${separator}workspace_id=${encodeURIComponent(id)}` : ""}`, {
+        ...options, headers: {"Content-Type": "application/json", "X-Switchyard-Client": "local-ui"},
+      });
+    } catch {
+      throw new Error("Unable to reach Switchyard. Check that it is running, then refresh.");
+    }
     const body = await response.json();
     if (!response.ok) throw new Error(Array.isArray(body.detail) ? body.detail.map(item => item.msg).join("; ") : body.detail || "Command request failed. Refresh and retry.");
     return body;
@@ -50,7 +55,7 @@
     $("command-timeout").value = session?.timeout || "0";
     $("command-tab-name").value = currentTab()?.name || "";
     renderTabs(); renderHistory(); renderOutput();
-    setText("command-status", state.tabs.length ? "" : "Create a tab to run your first command.");
+    setText("command-status", state.loaded && !state.tabs.length ? "Create a tab to run your first command." : "");
     setText("command-error", "");
   }
   function selectTab(id) {
@@ -73,7 +78,7 @@
     setText("command-output-heading", detail?.command || "Ready for a command");
     setText("command-output-status", labels[detail?.status] || "Idle");
     $("command-output-status").className = `command-status ${detail?.status || "idle"}`;
-    setText("command-output-meta", detail ? `${stamp(detail.started_at)}${detail.ended_at ? ` - ${stamp(detail.ended_at)}` : ""}${detail.exit_code !== null ? ` / exit ${detail.exit_code}` : ""} / ${detail.repository}` : "Each run starts a fresh Bash shell in the workspace root.");
+    setText("command-output-meta", detail ? `${stamp(detail.started_at)}${detail.ended_at ? ` - ${stamp(detail.ended_at)}` : ""}${detail.exit_code !== null ? ` / exit ${detail.exit_code}` : ""} / ${detail.repository}` : "Each run starts a fresh command shell in the workspace root.");
     // Process output is plain text: never interpret terminal escapes as HTML or links.
     const text = detail?.output?.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "") || (isActive(detail?.status) ? "Waiting for output..." : "No output yet.");
     if (output.textContent !== text) { output.textContent = text; if (atBottom) output.scrollTop = output.scrollHeight; }
@@ -91,6 +96,7 @@
     try {
       const tabs = await api("/tabs", {}, id);
       if (revision !== generation) return;
+      target.loaded = true;
       const hadSelection = !!currentTab();
       target.tabs = tabs;
       if (!tabs.some(tab => tab.id === target.tabId)) {
@@ -100,7 +106,7 @@
       if (!hadSelection && selected) $("command-tab-name").value = selected.name;
       if (tabs.length && $("command-status").textContent === "Create a tab to run your first command.") setText("command-status", "");
       renderTabs();
-      if (!target.tabId) return;
+      if (!target.tabId) { clearRefreshError(); return; }
       const session = tabState(), tabId = target.tabId;
       const history = await api(`/tabs/${tabId}/runs`, {}, id);
       if (revision !== generation || tabId !== target.tabId) return;
@@ -117,14 +123,25 @@
         detail = run; renderOutput();
         if (changed) setText("command-status", `${currentTab().name}: ${labels[run.status]}.`);
       }
-    } catch (error) { if (revision === generation) setText("command-error", error.message); }
+      clearRefreshError();
+    } catch (error) {
+      if (revision === generation) {
+        target.refreshError = error.message;
+        setText("command-error", error.message);
+        if (!target.tabs.length) setText("command-status", "");
+      }
+    }
     finally { refreshing = false; }
+  }
+  function clearRefreshError() {
+    if (state.refreshError === $("command-error").textContent) setText("command-error", "");
+    state.refreshError = null;
   }
   async function action(task) {
     if (busy || !workspace) return;
     busy = true; generation++;
     const revision = generation, id = workspace.id, target = state;
-    setText("command-error", ""); renderTabs(); renderOutput();
+    target.refreshError = null; setText("command-error", ""); renderTabs(); renderOutput();
     try { await task(id, target, () => revision === generation); }
     catch (error) { if (revision === generation) setText("command-error", error.message); }
     finally { busy = false; if (revision === generation) { renderTabs(); renderOutput(); } refresh(); }
@@ -200,7 +217,7 @@
   $("command-refresh").addEventListener("click", refresh);
   function workspaceChanged(selected) {
     captureDraft(); generation++; workspace = selected; detail = null;
-    if (selected && !states.has(selected.id)) states.set(selected.id, {tabs: [], tabId: storedTab(selected.id), sessions: new Map()});
+    if (selected && !states.has(selected.id)) states.set(selected.id, {tabs: [], tabId: storedTab(selected.id), sessions: new Map(), loaded: false});
     state = selected ? states.get(selected.id) : null;
     setText("command-workspace-name", selected?.name || "No workspace selected");
     setText("command-workspace-path", selected?.repository || "");

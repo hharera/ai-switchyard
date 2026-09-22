@@ -88,7 +88,13 @@
       const meta = document.createElement("span");
       meta.textContent = `${message.role === "user" ? "You" : message.label || "Assistant"}${message.timestamp ? ` / ${formatDate(message.timestamp)}` : ""}`;
       const content = document.createElement("div");
-      content.textContent = message.content;
+      const structured = message.role === "assistant" ? renderStructuredJson(message.content) : "";
+      if (structured) {
+        content.className = "structured-message";
+        content.innerHTML = structured;
+      } else {
+        content.textContent = message.content;
+      }
       item.append(meta, content);
       return item;
     }));
@@ -115,7 +121,7 @@
       const title = document.createElement("strong");
       title.textContent = item.title;
       const source = document.createElement("span");
-      source.textContent = `${sources.find(s => s.id === item.source)?.name || item.source}${item.archived ? " / Archived" : ""}`;
+      source.textContent = `${sources.find(s => s.id === item.source)?.name || item.source}${item.model ? ` / ${item.model}` : ""}${item.archived ? " / Archived" : ""}`;
       const date = document.createElement("time");
       date.dateTime = item.updated_at;
       date.textContent = formatDate(item.updated_at);
@@ -197,7 +203,6 @@
       if (!response.ok) throw new Error(body.detail || "Unable to load this conversation.");
       displayMessages(body.messages);
       empty.hidden = true;
-      list.scrollTop = 0;
       historyDetailStatus.textContent = body.truncated ? "This transcript is shortened for display. Open the original tool for the full conversation."
         : body.messages.length ? `${body.messages.length} messages. Viewing history does not send it to an AI provider.`
           : "No readable messages are available in this local conversation.";
@@ -373,6 +378,7 @@
     });
   });
   window.addEventListener("workspacechange", switchWorkspace);
+  window.addEventListener("chathistoryimported", loadHistory);
   historyRefresh.addEventListener("click", () => { loadHistory(); if (selectedHistory) openHistory(selectedHistory); });
   historySearch.addEventListener("input", renderHistory);
   historySource.addEventListener("change", renderHistory);

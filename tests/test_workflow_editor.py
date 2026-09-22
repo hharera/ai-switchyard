@@ -69,7 +69,7 @@ const fetch = async (url, options = {}) => {
 
   moveWorkflowStep(0, 2);
   assert.deepEqual(currentWorkflow().steps.slice(0, 2).map(item => item.step_id), ["execute", "plan"]);
-  assert.match(element("#workflow-editor").innerHTML, /draft\. Full dispatch requires/);
+  assert.match(element("#workflow-editor").innerHTML, /Ready for full dispatch\. The runner resolves phase dependencies/);
   moveWorkflowStep(1, 0);
   assert.deepEqual(currentWorkflow().steps.map(item => item.step_id), kinds);
 
@@ -103,6 +103,8 @@ const fetch = async (url, options = {}) => {
   assert.deepEqual(savedPayload.workflows[0].steps.slice(0, 2).map(item => item.step_id), ["execute", "plan"]);
   assert.equal(savedWorkflowConfig.workflows[0].name, "Edited workflow");
   assert.match(element("#workflows-status").textContent, /Workflows saved/);
+  assert.match(element("#workflows-status").textContent, /Available in every workspace/);
+  assert.equal("workspace_id" in savedPayload, false);
 
   // Capture actual form values before reordering, rather than just mutating the model.
   const current = currentWorkflow();
@@ -158,3 +160,33 @@ const fetch = async (url, options = {}) => {
 })().catch(error => { console.error(error); process.exit(1); });
 '''
     subprocess.run(["node"], input=harness + editor + checks, text=True, encoding="utf-8", check=True)
+
+
+def test_navigation_does_not_toggle_global_workspace_context():
+    script = Path("src/ninerouter_orchestrator/web_assets/app.js").read_text(encoding="utf-8")
+    navigation = script[script.index("const views ="):script.index("\nlet mcpConfig =")]
+    assert '"workspace-context":' not in navigation
+    harness = r'''
+const assert = require("node:assert/strict");
+const elements = new Map();
+const document = {
+  querySelector(selector) {
+    if (!elements.has(selector)) elements.set(selector, {hidden: false, dataset: {}, focus() {}});
+    return elements.get(selector);
+  },
+  querySelectorAll() { return []; },
+};
+const window = {addEventListener() {}, scrollTo() {}};
+const location = {hash: "#workflows"};
+'''
+    checks = r'''
+for (const view of Object.keys(views)) {
+  location.hash = `#${view}`;
+  navigatePanel();
+  assert.equal(document.querySelector("#workspace-context").hidden, false, view);
+}
+location.hash = "#workflows";
+navigatePanel();
+assert.equal(document.querySelector("#workflows-panel").hidden, false);
+'''
+    subprocess.run(["node"], input=harness + navigation + checks, text=True, encoding="utf-8", check=True)

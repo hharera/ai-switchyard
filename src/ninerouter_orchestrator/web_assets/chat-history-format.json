@@ -1,0 +1,11 @@
+{
+  "conversations": [
+    {
+      "title": "Example conversation - replace with your export",
+      "messages": [
+        {"role": "user", "content": "How does this project start?"},
+        {"role": "assistant", "content": "The entry point is main.py."}
+      ]
+    }
+  ]
+}

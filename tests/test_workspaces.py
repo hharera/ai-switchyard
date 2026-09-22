@@ -110,7 +110,7 @@ def test_workspace_save_initializes_git_repository(configured, tmp_path):
     assert save(configured).status_code == 200
 
 
-def test_workspace_save_rejects_a_subfolder_of_an_existing_repository(configured):
+def test_workspace_save_initializes_a_subfolder_as_an_independent_repository(configured):
     root = Path(configured.repository)
     nested = root / "nested"
     nested.mkdir()
@@ -118,9 +118,9 @@ def test_workspace_save_rejects_a_subfolder_of_an_existing_repository(configured
 
     response = save(configured)
 
-    assert response.status_code == 422
-    assert "root folder of the existing Git repository" in response.json()["detail"]
-    assert not (nested / ".git").exists()
+    assert response.status_code == 200
+    assert (nested / ".git").is_dir()
+    assert git(nested, "rev-parse", "--show-toplevel") == str(nested)
 
 
 @pytest.mark.parametrize("kind", ["bare", "broken", "broken-parent"])
@@ -218,6 +218,62 @@ def test_dispatch_inherits_workspace_and_snapshots_defaults(configured, monkeypa
     assert web.store.get(job["id"])["run_settings"]["command_timeout_seconds"] == 300
 
 
+def test_shared_workflow_can_dispatch_in_multiple_workspaces(configured, monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "_validate_step_combos", lambda steps: None)
+    # Author the library before any workspace exists.
+    library = client.get("/api/workflows").json()
+    shared = {**library["workflows"][0], "id": "shared", "name": "Shared route"}
+    collection = {"workflows": [*library["workflows"], shared], "default_workflow_id": "default"}
+    assert client.put("/api/workflows", json=collection).status_code == 200
+    assert web.workspace_store.get().workspaces == []
+    second_dir = tmp_path / "second"
+    second_dir.mkdir()
+    second_root = repository(second_dir)
+    second = configured.model_copy(update={
+        "id": "beta", "name": "Beta", "repository": str(second_root),
+    })
+    response = client.put("/api/workspaces", json={
+        "workspaces": [configured.model_dump(), second.model_dump()],
+        "default_workspace_id": configured.id,
+    })
+    assert response.status_code == 200
+    monkeypatch.setattr(
+        web,
+        "threading",
+        SimpleNamespace(Thread=lambda **kwargs: SimpleNamespace(start=lambda: None)),
+    )
+
+    runs = [client.post("/api/jobs", json={
+        "workspace_id": workspace_id,
+        "request": "Run the same shared workflow here",
+        "allow_host_execution": True,
+        "workflow_id": "shared",
+    }) for workspace_id in ("alpha", "beta")]
+
+    assert [run.status_code for run in runs] == [202, 202]
+    assert [run.json()["workspace_id"] for run in runs] == ["alpha", "beta"]
+    assert {run.json()["workflow_id"] for run in runs} == {"shared"}
+    assert [run.json()["repository"] for run in runs] == [configured.repository, str(second_root)]
+    assert runs[0].json()["workflow"] == runs[1].json()["workflow"]
+
+    shared["steps"][0]["system_prompt"] = "Updated shared planning instructions."
+    assert client.put("/api/workflows", json=collection).status_code == 200
+    for workspace_id in ("alpha", "beta"):
+        future = client.post("/api/jobs", json={
+            "workspace_id": workspace_id, "workflow_id": "shared",
+            "request": "Use the updated shared workflow",
+            "allow_host_execution": True,
+        })
+        assert future.status_code == 202
+        assert future.json()["workflow"]["steps"][0]["system_prompt"] == shared["steps"][0]["system_prompt"]
+    for run in runs:
+        assert web.store.get(run.json()["id"])["workflow"] == run.json()["workflow"]
+
+    # Removing execution contexts never deletes their reusable definitions.
+    assert client.put("/api/workspaces", json={"workspaces": []}).status_code == 200
+    assert client.get("/api/workflows").json()["workflows"] == collection["workflows"]
+
+
 def test_dispatch_never_bypasses_confirmation(configured):
     assert save(configured).status_code == 200
     response = client.post(
@@ -269,7 +325,6 @@ def test_worker_uses_snapshotted_settings(configured, monkeypatch):
         request="Run using configured settings",
         workflow=web.workflow_store.get().model_dump(),
     )
-    web.dispatch_lock.acquire()
     from pathlib import Path
 
     web._work(
@@ -325,9 +380,101 @@ def test_workspace_with_running_commands_cannot_be_removed_or_moved(configured, 
 
 def test_workspace_tab_and_shared_selectors_are_served():
     page = client.get("/").text
+    script = client.get("/assets/workspaces.js").text
+    styles = client.get("/assets/styles.css").text
     assert 'data-panel="workspaces"' in page
-    assert page.count("data-workspace-selector") == 4
+    assert page.count("data-workspace-selector") == 1
+    assert 'class="sidebar-workspace" id="workspace-context"' in page
+    assert 'id="active-workspace" data-workspace-selector' in page
+    assert 'id="active-workspace-path"' not in page
+    assert '<p class="sidebar-label">Navigation</p>' not in page
+    assert page.count('<a href="#workspaces">Manage workspaces</a>') == 2
+    assert 'id="chat-workspace"' not in page
+    assert 'id="dispatch-workspace"' not in page
+    assert 'id="git-workspace"' not in page
+    assert ".sidebar { width: 100%; padding: 11px 14px; overflow: visible;" in styles
     assert 'id="workspace-timeout"' in page
     assert 'id="browse-repository"' not in page
     assert 'id="browse-git-repository"' not in page
+    assert 'id="load-workspace-git-defaults"' in page
+    assert 'fetch("/api/repository/git-defaults"' in script
+    assert "The new remote branch template and draft preference remain editable." in page
     assert "/assets/workspaces.js" in page
+
+
+def test_repository_git_defaults_read_remote_and_cached_default_branch(tmp_path):
+    root = repository(tmp_path)
+    git(root, "remote", "add", "origin", "git@example.test:team/repo.git")
+    git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    response = client.post("/api/repository/git-defaults", json={"path": str(root)})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "repository": str(root), "remote": "origin", "base_branch": "main",
+        "remotes": ["origin"],
+    }
+
+
+def test_repository_git_defaults_prefer_push_remote_and_local_main(tmp_path):
+    root = repository(tmp_path)
+    git(root, "remote", "add", "origin", "git@example.test:team/repo.git")
+    git(root, "remote", "add", "publish", "git@example.test:team/fork.git")
+    git(root, "config", "remote.pushDefault", "publish")
+    git(root, "checkout", "-b", "feature/live-settings")
+
+    response = client.post("/api/repository/git-defaults", json={"path": str(root)})
+
+    assert response.status_code == 200
+    assert response.json()["remote"] == "publish"
+    assert response.json()["base_branch"] == "main"
+
+
+def test_repository_git_defaults_handle_missing_metadata_and_invalid_folders(tmp_path):
+    root = repository(tmp_path)
+    nested = root / "nested"
+    nested.mkdir()
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+
+    defaults = client.post("/api/repository/git-defaults", json={"path": str(root)})
+    assert defaults.status_code == 200
+    assert defaults.json()["remote"] is None
+    assert defaults.json()["base_branch"] == "main"
+    nested_response = client.post("/api/repository/git-defaults", json={"path": str(nested)})
+    assert nested_response.status_code == 422
+    assert "until it is saved as a workspace" in nested_response.json()["detail"]
+    ordinary_response = client.post(
+        "/api/repository/git-defaults", json={"path": str(ordinary)}
+    )
+    assert ordinary_response.status_code == 422
+    assert "Git settings are unavailable" in ordinary_response.json()["detail"]
+    assert client.post(
+        "/api/repository/git-defaults", json={"path": str(tmp_path / "missing")}
+    ).status_code == 404
+
+
+def test_local_only_workspace_preserves_detected_delivery_fields():
+    source = Path("src/ninerouter_orchestrator/web_assets/app.js").read_text(encoding="utf-8")
+    function = source[
+        source.index("function readDelivery(scope)"):
+        source.index('document.querySelectorAll("[data-delivery-mode]")')
+    ]
+    script = """
+const values = {
+  '#workspace-delivery-remote': {value: 'publish'},
+  '#workspace-delivery-branch': {value: 'orchestrator/{run_id}'},
+  '#workspace-delivery-base': {value: 'develop'},
+  '#workspace-delivery-draft': {checked: false},
+};
+const document = {querySelector: selector => selector.includes(':checked')
+  ? {value: 'none'} : values[selector]};
+""" + function + "\nconsole.log(JSON.stringify(readDelivery('workspace')));"
+
+    output = subprocess.check_output(["node", "-e", script], text=True)
+
+    assert json.loads(output) == {
+        "mode": "none", "remote": "publish", "branch": "orchestrator/{run_id}",
+        "base_branch": "develop", "draft": False,
+    }

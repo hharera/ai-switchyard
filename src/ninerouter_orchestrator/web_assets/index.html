@@ -11,12 +11,15 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/assets/styles.css">
     <link rel="stylesheet" href="/assets/chat.css">
+    <link rel="stylesheet" href="/assets/worktrees.css">
   </head>
   <body>
     <div class="page-grid" aria-hidden="true"></div>
-    <aside class="sidebar" aria-label="Primary navigation">
-      <a class="sidebar-logo" href="#overview"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>9Router <small>Switchyard</small></span></a>
-      <p class="sidebar-label">Workspace</p>
+    <aside class="sidebar" id="primary-sidebar" aria-label="Primary navigation">
+      <a class="sidebar-logo" href="#overview"><span class="brand-mark" aria-hidden="true"><img src="/assets/favicon.svg" alt="" width="34" height="34"></span><span>SwitchYard</span></a>
+      <div class="sidebar-workspace" id="workspace-context">
+        <div class="step-field"><label for="active-workspace">Active workspace</label><select id="active-workspace" data-workspace-selector disabled><option value="">Loading workspaces</option></select></div>
+      </div>
       <nav class="side-nav">
         <a href="#overview" data-panel="overview" aria-current="page">Overview</a>
         <a href="#workspaces" data-panel="workspaces">Workspaces</a>
@@ -24,6 +27,7 @@
         <a href="#chat" data-panel="chat">Chat</a>
         <a href="#commands" data-panel="commands">CMD <span id="command-nav-count" class="nav-live-count" hidden></span></a>
         <a href="#git" data-panel="git">Git</a>
+        <a href="#worktrees" data-panel="worktrees">Worktrees</a>
         <a href="#steps" data-panel="steps">Steps</a>
         <a href="#workflows" data-panel="workflows">Workflows</a>
         <a href="#mcps" data-panel="mcps">MCPs</a>
@@ -34,15 +38,11 @@
       </nav>
       <div class="sidebar-footer"><b>Local workspace</b><span>9router execution routes</span><small>Switchyard / v0.1</small></div>
     </aside>
+    <div class="pane-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-label="Resize primary navigation" aria-controls="primary-sidebar" aria-orientation="vertical" aria-valuemin="190" aria-valuemax="360" aria-valuenow="232" tabindex="0" title="Drag to resize. Use arrow keys for precise control; double-click to reset."></div>
     <main id="workspace" data-view="overview">
       <div class="workspace-heading"><p class="eyebrow">Engineering operations</p><h1 id="view-title" tabindex="-1">Overview</h1><p id="view-description">Dispatch work, configure routes, and inspect results.</p></div>
-      <div class="workspace-context">
-        <div class="step-field"><label for="active-workspace">Active workspace</label><select id="active-workspace" data-workspace-selector disabled><option value="">Loading workspaces</option></select></div>
-        <p id="active-workspace-path" class="field-note" role="status"></p>
-        <a href="#workspaces">Manage workspaces</a>
-      </div>
       <section id="workspaces-panel" class="workspaces-panel" aria-label="Saved workspaces" hidden>
-        <div class="workflow-heading"><div><p class="eyebrow">Repository configuration</p><h2>Saved workspaces</h2><p>Save a repository once. Dispatch, Git, and Runs share the active workspace. Workflow templates, MCPs, and CLIs remain global.</p></div><button class="secondary-button" id="new-workspace" type="button">Add workspace</button></div>
+        <div class="workflow-heading"><div><p class="eyebrow">Repository configuration</p><h2>Saved workspaces</h2><p>Save a repository once. Dispatch, Git, and Runs share the active workspace. Workflows, step templates, MCPs, and CLIs are shared across all workspaces.</p></div><button class="secondary-button" id="new-workspace" type="button">Add workspace</button></div>
         <div class="workspace-manager">
           <section id="workspace-list" class="workspace-list" aria-label="Configured workspaces"></section>
           <form id="workspace-form">
@@ -50,12 +50,12 @@
             <div class="workspace-fields">
               <div class="step-field"><label for="workspace-name">Name</label><input id="workspace-name" required maxlength="80" autocomplete="off"></div>
               <div class="step-field workspace-wide"><label for="workspace-repository">Repository path</label><div class="repository-controls"><input id="workspace-repository" required autocomplete="off" list="workspace-recent-paths" placeholder="/path/to/repository"><button class="secondary-button" id="browse-workspace" type="button">Browse folders</button></div><datalist id="workspace-recent-paths"></datalist><p class="field-note">Choose a local folder. If it is not a Git repository, Git is initialized when you save. Previously used paths appear as suggestions.</p></div>
-              <div class="step-field"><label for="workspace-workflow">Default workflow (optional)</label><select id="workspace-workflow"></select></div>
+              <div class="step-field"><label for="workspace-workflow">Default workflow (optional)</label><select id="workspace-workflow" aria-describedby="workspace-workflow-help"></select><p class="field-note" id="workspace-workflow-help">Choose from the shared library. This sets a dispatch default, not a workspace-owned copy.</p></div>
               <div class="step-field"><label for="workspace-forks">Attempts per ticket</label><input id="workspace-forks" type="number" min="1" max="5" value="3" required></div>
               <div class="step-field"><label for="workspace-timeout">Command timeout (seconds)</label><input id="workspace-timeout" type="number" min="30" max="7200" value="1800" required></div>
               <div class="step-field"><label for="workspace-git-base">Git comparison base</label><input id="workspace-git-base" value="main" required maxlength="240"></div>
             </div>
-            <fieldset><legend>Delivery after a successful run</legend><div class="delivery-mode" data-delivery-mode="workspace"></div><div class="delivery-fields" data-delivery-fields="workspace"></div><button class="secondary-button" id="copy-workspace-delivery" type="button">Copy global delivery defaults</button></fieldset>
+            <fieldset><legend>Delivery after a successful run</legend><div class="delivery-mode" data-delivery-mode="workspace"></div><div class="delivery-fields" data-delivery-fields="workspace"></div><button class="secondary-button" id="load-workspace-git-defaults" type="button">Load Git settings from repository</button> <button class="secondary-button" id="copy-workspace-delivery" type="button">Copy global delivery defaults</button><p class="field-note">Remote and base branch come from local Git settings. The new remote branch template and draft preference remain editable.</p></fieldset>
             <p class="field-note">These are defaults, not permission to execute. Every workflow run still requires host-command confirmation.</p>
             <label class="mcp-enabled"><input id="workspace-default" type="checkbox">Use as the default workspace</label>
             <div class="form-error" id="workspace-error" role="alert"></div><p id="workspace-status" class="field-note" role="status"></p>
@@ -85,14 +85,11 @@
         <header class="chat-heading">
           <div class="chat-heading-title">
             <h2 id="chat-heading" tabindex="-1">Workspace chats</h2>
-            <span class="chat-header-divider" aria-hidden="true">/</span>
-            <label class="chat-sr-only" for="chat-workspace">Active workspace</label>
-            <select id="chat-workspace" data-workspace-selector disabled><option value="">Loading workspaces</option></select>
           </div>
           <button class="chat-new-button" id="chat-new" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button>
         </header>
         <div class="chat-shell">
-          <aside class="chat-history" aria-labelledby="chat-history-heading">
+          <aside class="chat-history" id="chat-history-pane" aria-labelledby="chat-history-heading">
             <div class="chat-history-heading"><h3 id="chat-history-heading">Chat history</h3><button id="chat-history-refresh" class="chat-new-button" type="button">Refresh</button></div>
             <p id="chat-history-path" class="chat-history-path"></p>
             <label for="chat-history-search">Search conversations</label>
@@ -103,8 +100,25 @@
             <p id="chat-history-error" role="alert"></p>
             <ol id="chat-history-list" aria-label="Workspace conversations"></ol>
             <button id="chat-history-clear" class="chat-new-button" type="button" hidden>Clear filters</button>
-            <details class="chat-history-coverage"><summary>History sources</summary><p>Only local histories linked to this exact workspace path are shown. Cloud-only chats and tools without a history adapter are not included.</p><ul id="chat-history-sources"></ul></details>
+            <details class="chat-history-coverage"><summary>History sources</summary><p>Automatic history matches this exact workspace path. Use Import chats for exported conversations from other tools. Importing does not connect or sync a cloud account.</p><ul id="chat-history-sources"></ul></details>
+            <details class="chat-history-coverage" id="chat-import">
+              <summary>Import chats</summary>
+              <form id="chat-import-form">
+                <p>Choose a JSON export from ChatGPT, Claude, Open WebUI, or any tool using role/content messages. Review it, then select only conversations belonging to this workspace. Nothing is sent to an AI provider.</p>
+                <p id="chat-import-workspace" class="chat-history-path"></p>
+                <label for="chat-import-source">Original AI tool</label>
+                <input id="chat-import-source" name="source" type="text" maxlength="80" required placeholder="ChatGPT" autocomplete="off" aria-describedby="chat-import-error">
+                <label for="chat-import-file">JSON export (up to 8 MB)</label>
+                <input id="chat-import-file" name="export" type="file" accept=".json,application/json" required aria-describedby="chat-import-error">
+                <button id="chat-import-preview" class="secondary-button" type="submit">Review export</button>
+                <fieldset id="chat-import-selection" hidden><legend>Select conversations for this workspace</legend><div id="chat-import-items"></div><button id="chat-import-save" class="secondary-button" type="button">Import selected chats</button></fieldset>
+                <p id="chat-import-status" role="status" aria-live="polite"></p>
+                <p id="chat-import-error" role="alert"></p>
+                <a href="/assets/chat-history-format.json" download>Download an example JSON format</a>
+              </form>
+            </details>
           </aside>
+          <div class="pane-resizer chat-history-resizer" id="chat-history-resizer" role="separator" aria-label="Resize chat history" aria-controls="chat-history-pane" aria-orientation="vertical" aria-valuemin="240" aria-valuemax="560" aria-valuenow="320" tabindex="0" title="Drag to resize. Use arrow keys for precise control; double-click to reset."></div>
           <div class="chat-conversation">
             <div id="chat-history-detail" class="chat-history-detail" hidden>
               <button id="chat-history-back" class="chat-new-button" type="button">Back to history</button>
@@ -159,16 +173,15 @@
       </section>
       <section id="commands-panel" class="commands-panel" aria-labelledby="commands-heading" hidden>
         <header class="command-heading">
-          <div><p class="eyebrow">Workspace command center</p><h2 id="commands-heading" tabindex="-1">Command tabs</h2><p>Run host commands in the active workspace and return later to inspect output and exit status.</p></div>
-          <div class="command-workspace-context"><span>Active workspace</span><b id="command-workspace-name">No workspace selected</b><code id="command-workspace-path"></code></div>
+          <h2 id="commands-heading" tabindex="-1">Command tabs</h2>
+          <div class="command-workspace-context"><span>Workspace</span><b id="command-workspace-name">No workspace selected</b><code id="command-workspace-path"></code></div>
         </header>
         <div id="command-workspace-status" class="command-workspace-status" aria-label="Running commands by workspace"></div>
-        <p class="command-warning"><b>Host access</b><span>Commands run directly on this machine with the workspace as their working folder. Review every command before confirming.</span></p>
         <div id="command-empty" class="command-empty" hidden><b>Select a workspace to use commands</b><span>Add or choose a workspace, then return here to create command tabs.</span><a href="#workspaces">Manage workspaces</a></div>
         <div id="command-console" class="command-console" hidden>
           <div class="command-tab-bar">
             <div id="command-tabs" class="command-tabs" role="tablist" aria-label="Command tabs"></div>
-            <button id="command-add-tab" class="command-add-tab" type="button"><span aria-hidden="true">+</span> New tab</button>
+            <div class="command-tab-actions"><button id="command-refresh" class="command-add-tab" type="button">Refresh</button><button id="command-add-tab" class="command-add-tab" type="button"><span aria-hidden="true">+</span> New tab</button></div>
           </div>
           <div id="command-tab-content" role="tabpanel" aria-labelledby="commands-heading">
           <div class="command-toolbar">
@@ -179,7 +192,7 @@
           </div>
           <div class="command-stage">
             <aside class="command-history" aria-labelledby="command-history-heading">
-              <div><h3 id="command-history-heading">Command history</h3><button id="command-refresh" class="secondary-button" type="button">Refresh</button></div>
+              <div><h3 id="command-history-heading">Command history</h3></div>
               <ol id="command-history-list"></ol>
               <button id="command-history-more" class="secondary-button" type="button" hidden>Load older commands</button>
             </aside>
@@ -190,14 +203,20 @@
             </section>
           </div>
           <form id="command-form" class="command-composer">
-            <div class="command-entry"><label for="command-input">Command</label><textarea id="command-input" name="command" rows="2" maxlength="12000" required placeholder="npm test" aria-describedby="command-help command-error"></textarea><p id="command-help" class="field-note">Runs from the workspace root. Ctrl / Command + Enter also runs the command.</p></div>
+            <div class="command-entry"><label for="command-input">Command</label><textarea id="command-input" name="command" rows="2" maxlength="12000" required placeholder="npm test" aria-describedby="command-help command-error"></textarea><p id="command-help" class="field-note">Runs on this machine from the workspace root. Review before confirming. Ctrl / Command + Enter also runs it.</p></div>
             <div class="step-field command-timeout"><label for="command-timeout">Timeout</label><select id="command-timeout"><option value="0">No timeout</option><option value="60">1 minute</option><option value="300">5 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option></select></div>
             <button id="command-run" class="dispatch-button compact-button" type="submit"><span>Run command</span><i aria-hidden="true"></i></button>
           </form>
           <p id="command-error" class="form-error" role="alert"></p>
           <p id="command-status" class="field-note" role="status" aria-live="polite"></p>
           </div>
-          <p class="command-boundary">Non-interactive Bash commands only; each run has a fresh environment. Keep servers in the foreground. Tabs persist across reloads; stopping SwitchYard stops its commands. No timeout means run until finished or stopped.</p>
+        </div>
+        <div class="command-guidance">
+          <p>Commands run directly on this machine. Review before confirming.</p>
+          <details class="configuration-note">
+            <summary>How commands run</summary>
+            <div><p>Uses Bash on macOS and Linux or cmd.exe on Windows. Each run starts a fresh, non-interactive shell in the workspace folder. Keep servers in the foreground.</p><p>Tabs and history persist across reloads; stopping Switchyard stops its commands. No timeout means run until finished or stopped.</p></div>
+          </details>
         </div>
       </section>
       <section class="hero" id="overview-panel">
@@ -231,8 +250,6 @@
             <div><h2>Dispatch a change</h2><p>Using <button class="inline-action" id="recipe-name" type="button">Built-in engineering steps</button></p></div>
           </div>
           <form id="dispatch-form">
-            <label for="dispatch-workspace">Workspace</label>
-            <select id="dispatch-workspace" name="workspace_id" data-workspace-selector required disabled><option value="">Choose a saved workspace</option></select>
             <input id="repository" type="hidden">
             <p class="field-note" id="dispatch-workspace-settings">Add a workspace before dispatching.</p>
             <p class="field-note" id="repository-help">Use a project folder or Git repository. Before the first dispatch, Switchyard records existing non-ignored files in a local baseline commit. Review your ignore rules first.</p>
@@ -240,7 +257,7 @@
 
             <label for="dispatch-workflow">Workflow (optional)</label>
             <select id="dispatch-workflow" name="workflow_id" aria-describedby="dispatch-workflow-help"><option value="">Without a workflow - built-in steps</option></select>
-            <p class="field-note" id="dispatch-workflow-help" role="status">Use the built-in engineering steps without saved overrides, or choose a workflow. Either choice is recorded with this dispatch.</p>
+            <p class="field-note" id="dispatch-workflow-help" role="status">Choose a shared workflow to run in this workspace, or use the built-in engineering steps. Either choice is recorded with this dispatch.</p>
 
             <label for="request">What should change?</label>
             <textarea id="request" name="request" required minlength="10" placeholder="Add campaign approval history with reviewer notes and tests."></textarea>
@@ -299,11 +316,7 @@
         <button class="secondary-button" id="refresh-git" type="button">Refresh changes</button>
       </div>
       <form id="git-controls" class="git-controls">
-        <div class="git-repository-field">
-          <label for="git-workspace">Workspace</label>
-          <select id="git-workspace" data-workspace-selector required disabled><option value="">Choose a saved workspace</option></select>
-          <input id="git-repository" type="hidden">
-        </div>
+        <input id="git-repository" type="hidden">
         <fieldset class="git-comparison">
           <legend>Compare</legend>
           <label><input type="radio" name="git-comparison" value="working" checked><span>All changes</span></label>
@@ -335,13 +348,30 @@
         <div class="git-empty"><b>Select a repository to manage</b><span>Choose a workspace to inspect changes and run Git operations.</span></div>
       </div>
     </section>
+    <section id="worktrees-panel" class="worktrees-panel" aria-labelledby="worktrees-heading" hidden>
+      <div class="workflow-heading">
+        <div><p class="eyebrow">Isolated checkouts</p><h2 id="worktrees-heading">Worktrees</h2><p>Inspect integration and candidate worktrees retained by Switchyard for the active workspace.</p></div>
+        <button class="secondary-button" id="refresh-worktrees" type="button">Refresh worktrees</button>
+      </div>
+      <p class="scope-note"><b>Keep the work you need</b><span>Lock a worktree to prevent cleanup. Removal deletes its checkout folder but keeps its branch and commits. Local files, including ignored files, must be preserved first.</span></p>
+      <div id="worktree-summary" class="worktree-summary" aria-label="Worktree totals"></div>
+      <div class="worktree-toolbar">
+        <div class="step-field"><label for="worktree-search">Search worktrees</label><input id="worktree-search" type="search" placeholder="Run, ticket, branch, or path" autocomplete="off"></div>
+        <div class="step-field"><label for="worktree-filter">Show</label><select id="worktree-filter"><option value="all">All worktrees</option><option value="changed">With local files</option><option value="locked">Locked</option><option value="removable">Ready to remove</option><option value="missing">Missing folders</option></select></div>
+        <button class="secondary-button" id="clear-worktree-filters" type="button">Clear filters</button>
+      </div>
+      <p id="worktree-busy" class="scope-note" hidden>A workflow is running. Worktree actions are paused until it finishes. Refresh to check again.</p>
+      <p id="worktree-status" class="field-note" role="status"></p>
+      <p id="worktree-error" class="form-error" role="alert" tabindex="-1"></p>
+      <div id="worktree-list" class="worktree-list" aria-busy="false"></div>
+    </section>
     <section id="steps-panel" class="steps-panel" aria-label="Reusable step templates">
       <form id="steps-form">
         <div class="workflow-heading">
           <div>
             <p class="eyebrow">Reusable building blocks</p>
-            <h2>Step templates</h2>
-            <p>Configure independent templates with a step type, default tool/model, and prompt. Reuse each template in any compatible workflow.</p>
+            <div class="template-catalog-title"><h2>Step templates</h2><span id="template-count" class="template-count"></span></div>
+            <p>Configure shared templates with a step type, default tool/model, and prompt. Reuse each template in any compatible workflow across all workspaces.</p>
           </div>
         </div>
         <p class="scope-note"><b>No execution order here</b><span>Templates are independent building blocks. <a href="#workflows">Workflows</a> define their sequence. Per-workflow overrides never change the shared template.</span></p>
@@ -355,13 +385,13 @@
         </div>
       </form>
     </section>
-    <section id="workflows-panel" class="workflows-panel" aria-label="Workflow configuration">
+    <section id="workflows-panel" class="workflows-panel" aria-label="Shared workflow configuration">
       <form id="workflows-form">
         <div class="workflow-builder-intro">
           <div class="workflow-builder-copy">
-            <p class="eyebrow">Pipeline builder</p>
+            <p class="eyebrow">Shared pipeline builder</p>
             <h2>Build a workflow</h2>
-            <p>Edit a saved workflow or start with an empty route. Add reusable steps, arrange them, and override only what this workflow needs.</p>
+            <p>Build once, reuse in any workspace. Add shared steps, arrange them, and override only what this workflow needs. Choose the workspace when you dispatch.</p>
           </div>
           <ol class="workflow-guide" aria-label="How to build a workflow">
             <li><span>01</span><div><b>Choose</b><small>Select a workflow or create one.</small></div></li>
@@ -369,6 +399,7 @@
             <li><span>03</span><div><b>Save</b><small>Save the workflow or keep it as a draft.</small></div></li>
           </ol>
         </div>
+        <p class="scope-note"><b>Shared across all workspaces</b><span>No workspace is needed to create or edit a workflow. Saved changes apply to future runs wherever it is used. Existing runs keep their snapshots.</span></p>
         <div class="workflow-toolbar">
           <div class="step-field workflow-picker"><div class="workflow-picker-label"><label for="workflow-selector">Workflow to edit</label><span id="workflow-count" aria-live="polite">Loading workflows</span></div><select id="workflow-selector"></select></div>
           <button class="create-workflow-button" id="add-workflow" data-create-workflow type="button"><span aria-hidden="true">+</span> New workflow</button>
@@ -377,13 +408,19 @@
         <div id="workflow-editor"></div>
         <p id="workflow-dnd-announcement" class="workflow-sr-only" role="status"></p>
         <div class="form-error" id="workflows-error" role="alert"></div><p id="workflows-status" class="field-note" role="status"></p>
-        <div class="workflow-actions" id="workflow-actions" hidden><label class="mcp-enabled"><input id="default-workflow" type="checkbox">Use as default for new dispatches</label><button class="dispatch-button compact-button" type="submit"><span>Save changes</span><i aria-hidden="true"></i></button></div>
+        <div class="workflow-actions" id="workflow-actions" hidden><div class="workflow-run-options"><label class="mcp-enabled"><input id="default-workflow" type="checkbox">Use as default for new dispatches</label><label class="mcp-enabled"><input id="workflow-isolated-worktree" type="checkbox" aria-describedby="workflow-isolated-worktree-help">Use an isolated integration worktree</label><span id="workflow-isolated-worktree-help">Keeps the selected checkout unchanged. Turn this off to integrate commits into its current branch; candidate attempts still use separate worktrees.</span></div><button class="dispatch-button compact-button" type="submit"><span>Save changes</span><i aria-hidden="true"></i></button></div>
       </form>
     </section>
     <section id="mcps-panel" class="mcps-panel" aria-label="MCP configuration">
-      <div class="workflow-heading"><div><p class="eyebrow">Global tool connections</p><h2>Shared MCP servers</h2><p>Define a server once for Codex and OpenCode, then add a tool override only when one runtime needs different settings. All 9router combos use OpenCode's resolved connections.</p></div></div>
-      <p class="scope-note"><b>Scope: all repositories</b><span>Each run saves an MCP snapshot. Later global edits do not change existing runs.</span></p>
-      <p class="field-note">A tool override with the same server name replaces the shared definition for that tool. Only add trusted servers: local commands can execute on this machine and remote tools may change external data. OAuth sign-in remains separate in each CLI.</p>
+      <div class="workflow-heading mcp-heading"><div><h2>MCP servers</h2><p>Share connections across workspaces. Add an override only when Codex or OpenCode needs different settings.</p></div></div>
+      <p class="field-note">Only add trusted servers. They can run local commands or change external data.</p>
+      <details class="configuration-note">
+        <summary>Scope and safety</summary>
+        <div>
+          <p>Changes apply to future runs across all workspaces. Existing runs keep their saved MCP snapshot.</p>
+          <p>An override with the same server name replaces the shared definition for that tool. All 9router combos use OpenCode's resolved connections. Sign in to OAuth separately in each CLI.</p>
+        </div>
+      </details>
       <section class="mcp-catalog" aria-labelledby="mcp-catalog-heading">
         <div class="mcp-catalog-heading"><div><h3 id="mcp-catalog-heading">MCP catalog</h3><p class="field-note">Start a shared draft from the supplied list. Each entry needs connection details from its official source; it is not installed or tested here. Install counts are a supplied snapshot, not live statistics.</p></div><div class="step-field"><label for="mcp-catalog-search">Find an MCP</label><input id="mcp-catalog-search" type="search" autocomplete="off" placeholder="Playwright, Firebase, Context7..."></div></div>
         <p id="mcp-catalog-count" class="field-note" role="status">Loading catalog...</p>
@@ -410,8 +447,8 @@
       <form id="cli-form" class="cli-form">
         <datalist id="cli-provider-options"><option value="9router"></option><option value="OpenAI"></option><option value="Anthropic"></option><option value="Google"></option><option value="GitHub"></option><option value="AWS"></option><option value="xAI"></option><option value="OpenRouter"></option><option value="Ollama"></option></datalist>
         <div class="cli-grid">
-          <section class="cli-card"><span class="step-kind">Planning and review</span><div class="cli-card-heading"><h3>OpenAI Codex CLI / App</h3><span id="codex-cli-status" class="cli-detection-badge">Checking</span></div><div class="cli-config-fields"><div class="step-field wide"><label for="codex-command">Command (JSON array)</label><input id="codex-command" required></div><div class="step-field"><label for="codex-provider">Provider ID</label><input id="codex-provider" list="cli-provider-options" maxlength="120" pattern="[A-Za-z0-9_-]+" placeholder="Built-in OpenAI provider"></div><div class="step-field"><label for="codex-model">Default model</label><input id="codex-model" maxlength="200" placeholder="Use the Codex default"></div><div class="step-field wide"><label for="codex-base-url">Provider endpoint</label><input id="codex-base-url" type="url" maxlength="2000" placeholder="https://api.example.com/v1"></div><div class="step-field wide"><label for="codex-api-key-env">API key environment variable</label><input id="codex-api-key-env" maxlength="120" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"><span class="engine-note">Only the variable name is saved.</span></div></div><button class="secondary-button cli-setup-button" type="button" data-cli-setup="codex">View setup instructions</button></section>
-          <section class="cli-card"><span class="step-kind">9router execution</span><div class="cli-card-heading"><h3>OpenCode</h3><span id="opencode-cli-status" class="cli-detection-badge">Checking</span></div><div class="cli-config-fields"><div class="step-field wide"><label for="opencode-command">Command (JSON array)</label><input id="opencode-command" required></div><div class="step-field"><label for="opencode-provider">Provider ID</label><input id="opencode-provider" list="cli-provider-options" maxlength="120" placeholder="9router"></div><div class="step-field"><label for="opencode-model">Default model</label><input id="opencode-model" maxlength="200" placeholder="Workflow route"></div><div class="step-field wide"><label for="opencode-base-url">Provider endpoint</label><input id="opencode-base-url" type="url" maxlength="2000" placeholder="https://api.example.com/v1"></div><div class="step-field wide"><label for="opencode-api-key-env">API key environment variable</label><input id="opencode-api-key-env" maxlength="120" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"><span class="engine-note">Only the variable name is saved.</span></div></div><button class="secondary-button cli-setup-button" type="button" data-cli-setup="opencode">View setup instructions</button></section>
+          <details class="cli-card integrated-cli-card" data-cli="codex"><summary><div><span class="step-kind">Planning and review</span><div class="cli-card-heading"><h3>OpenAI Codex CLI / App</h3><span id="codex-cli-status" class="cli-detection-badge">Checking</span></div></div><span class="managed-cli-chevron" aria-hidden="true"></span></summary><div class="integrated-cli-config"><div class="cli-config-fields"><div class="step-field wide"><label for="codex-command">Command (JSON array)</label><input id="codex-command" required></div><div class="step-field"><label for="codex-provider">Provider ID</label><input id="codex-provider" list="cli-provider-options" maxlength="120" pattern="[A-Za-z0-9_-]+" placeholder="Built-in OpenAI provider"></div><div class="step-field"><label for="codex-model">Default model</label><input id="codex-model" maxlength="200" placeholder="Use the Codex default"></div><div class="step-field wide"><label for="codex-base-url">Provider endpoint</label><input id="codex-base-url" type="url" maxlength="2000" placeholder="https://api.example.com/v1"></div><div class="step-field wide"><label for="codex-api-key-env">API key environment variable</label><input id="codex-api-key-env" maxlength="120" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"><span class="engine-note">Only the variable name is saved.</span></div></div><button class="secondary-button cli-setup-button" type="button" data-cli-setup="codex">View setup instructions</button></div></details>
+          <details class="cli-card integrated-cli-card" data-cli="opencode"><summary><div><span class="step-kind">9router execution</span><div class="cli-card-heading"><h3>OpenCode</h3><span id="opencode-cli-status" class="cli-detection-badge">Checking</span></div></div><span class="managed-cli-chevron" aria-hidden="true"></span></summary><div class="integrated-cli-config"><div class="cli-config-fields"><div class="step-field wide"><label for="opencode-command">Command (JSON array)</label><input id="opencode-command" required></div><div class="step-field"><label for="opencode-provider">Provider ID</label><input id="opencode-provider" list="cli-provider-options" maxlength="120" placeholder="9router"></div><div class="step-field"><label for="opencode-model">Default model</label><input id="opencode-model" maxlength="200" placeholder="Workflow route"></div><div class="step-field wide"><label for="opencode-base-url">Provider endpoint</label><input id="opencode-base-url" type="url" maxlength="2000" placeholder="https://api.example.com/v1"></div><div class="step-field wide"><label for="opencode-api-key-env">API key environment variable</label><input id="opencode-api-key-env" maxlength="120" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="OPENAI_API_KEY"><span class="engine-note">Only the variable name is saved.</span></div></div><button class="secondary-button cli-setup-button" type="button" data-cli-setup="opencode">View setup instructions</button></div></details>
         </div>
         <section class="managed-clis" aria-labelledby="managed-clis-title">
           <div class="additional-clis-heading"><div><h3 id="managed-clis-title">AI tool catalog</h3><p class="field-note">Platform badges describe catalog compatibility; local detection determines what is installed. Expand a card to review setup and saved preferences.</p></div><span id="managed-cli-count" class="managed-cli-count" aria-live="polite"></span></div>
@@ -447,16 +484,19 @@
       </form>
     </dialog>
     <aside id="run-drawer" class="run-drawer" aria-label="Run details" aria-hidden="true">
-      <header class="run-drawer-header"><span>Run details</span><button id="run-drawer-close" class="dialog-close" type="button" aria-label="Close run details">Close</button></header>
+      <header class="run-drawer-header"><div class="run-drawer-heading"><span>Run details</span><small id="run-stream-status" role="status" aria-live="polite"></small></div><button id="run-drawer-close" class="dialog-close" type="button" aria-label="Close run details">Close</button></header>
       <div id="run-detail"></div>
     </aside>
     <script src="/assets/theme-controls.js" defer></script>
+    <script src="/assets/pane-resize.js" defer></script>
     <script src="/assets/run-details.js" defer></script>
     <script src="/assets/app.js" defer></script>
     <script src="/assets/workspaces.js" defer></script>
     <script src="/assets/command-console.js" defer></script>
     <script src="/assets/chat.js" defer></script>
+    <script src="/assets/chat-import.js" defer></script>
     <script src="/assets/git-diff.js" defer></script>
     <script src="/assets/git-view.js" defer></script>
+    <script src="/assets/worktrees.js" defer></script>
   </body>
 </html>

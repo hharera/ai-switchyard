@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from ninerouter_orchestrator import web
 from ninerouter_orchestrator.adapters.codex import CodexAdapter
 from ninerouter_orchestrator.chat_history import ChatHistory
+from ninerouter_orchestrator.chat_import import parse_export
 from ninerouter_orchestrator.workspace_config import WorkspaceConfiguration, WorkspaceStore
 
 
@@ -109,7 +110,7 @@ def test_gemini_and_qwen_project_hashes_and_sources(history, tmp_path):
                          {"type": "gemini", "content": "Answer", "thoughts": [{"description": "secret"}]}],
         })
     entries, _ = history.scan(tmp_path)
-    assert {entry.source for entry in entries} == {"gemini", "qwen-code"}
+    assert {entry.source for entry in entries} == {"gemini-cli", "qwen-code"}
     assert len({entry.id for entry in entries}) == 2
     assert len(history.messages(entries[0])["messages"]) == 2
     assert not history.scan(tmp_path / "other")[0]
@@ -145,6 +146,185 @@ def test_switchyard_history_persists_across_instances(history, tmp_path):
     assert len(restored.messages(entries[0])["messages"]) == 4
     if os.name == "posix":
         assert entries[0].path.stat().st_mode & 0o777 == 0o600
+
+
+def test_aider_history_is_workspace_local_and_splits_sessions(history, tmp_path):
+    path = tmp_path / ".aider.chat.history.md"
+    path.write_text(
+        "# aider chat started at 2026-01-01 10:00:00\n\n"
+        "#### First line  \n#### second line  \n\nFirst answer\n\n"
+        "# aider chat started at 2026-01-02 10:00:00\n\n"
+        "#### Second question  \n\nSecond answer\n",
+        encoding="utf-8",
+    )
+    entries, _ = history.scan(tmp_path)
+    aider = [entry for entry in entries if entry.source == "aider"]
+    assert len(aider) == 2
+    first = next(entry for entry in aider if entry.title == "First line")
+    assert [message["content"] for message in history.messages(first)["messages"]] == [
+        "First line\nsecond line", "First answer",
+    ]
+    assert not history.scan(tmp_path / "other")[0]
+
+
+def test_cline_roo_and_kilo_are_scoped_and_exclude_internal_context(history, tmp_path):
+    cline = history.home / ".cline/data"
+    write_json(cline / "state/taskHistory.json", [{
+        "id": "c1", "ts": 1767270000000, "task": "Cline task",
+        "cwdOnTaskInitialization": str(tmp_path), "modelId": "model-one",
+    }])
+    write_json(cline / "tasks/c1/api_conversation_history.json", [
+        {"role": "user", "content": [{"type": "text", "text": "<task>Cline task</task>"},
+                                      {"type": "text", "text": "<environment_details>secret</environment_details>"}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "private"},
+                                           {"type": "text", "text": "Cline answer"}]},
+        {"role": "user", "content": [{"type": "tool_result", "content": "private output"}]},
+    ])
+
+    storage = history.home / ".config/Code/User/globalStorage"
+    roo = storage / "rooveterinaryinc.roo-cline"
+    write_json(roo / "tasks/r1/history_item.json", {
+        "id": "r1", "ts": 1767270000001, "task": "Roo task", "workspace": str(tmp_path),
+    })
+    write_json(roo / "tasks/r1/api_conversation_history.json", [
+        {"role": "user", "content": "Roo question"},
+        {"role": "assistant", "content": "Roo answer"},
+    ])
+
+    kilo = storage / "kilocode.kilo-code"
+    write_json(kilo / "tasks/k1/api_conversation_history.json", [
+        {"role": "user", "content": "Kilo question"},
+        {"role": "assistant", "content": "Kilo answer"},
+    ])
+    database = storage / "state.vscdb"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE ItemTable (key TEXT UNIQUE, value BLOB)")
+        db.execute("INSERT INTO ItemTable VALUES (?, ?)", ("kilocode.kilo-code", json.dumps({
+            "taskHistory": [{
+                "id": "k1", "ts": 1767270000002, "task": "Kilo task",
+                "workspace": str(tmp_path),
+            }],
+        })))
+
+    entries, sources = history.scan(tmp_path)
+    family = {entry.source: entry for entry in entries if entry.source in {"cline", "roo", "kilo-code"}}
+    assert set(family) == {"cline", "roo", "kilo-code"}
+    assert [message["content"] for message in history.messages(family["cline"])["messages"]] == [
+        "Cline task", "Cline answer",
+    ]
+    assert [message["content"] for message in history.messages(family["roo"])["messages"]] == [
+        "Roo question", "Roo answer",
+    ]
+    assert [message["content"] for message in history.messages(family["kilo-code"])["messages"]] == [
+        "Kilo question", "Kilo answer",
+    ]
+    assert all(next(source for source in sources if source["id"] == item)["status"] == "ready"
+               for item in family)
+
+
+def test_amp_and_hermes_are_workspace_scoped(history, tmp_path, monkeypatch):
+    amp = history.data / "amp/threads/thread.json"
+    write_json(amp, {
+        "id": "amp1", "created": 1767270000000, "title": "Amp task",
+        "env": {"initial": {"trees": [{"uri": tmp_path.as_uri()}]}},
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Amp question"}]},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "secret"},
+                                               {"type": "text", "text": "Amp answer"}],
+             "usage": {"model": "amp-model", "timestamp": "2026-01-01T00:00:00Z"}},
+        ],
+    })
+    hermes = history.home / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(hermes))
+    hermes.mkdir()
+    with sqlite3.connect(hermes / "state.db") as db:
+        db.execute("CREATE TABLE sessions (id, cwd, title, started_at, ended_at, model, "
+                   "model_config, archived)")
+        db.execute("INSERT INTO sessions VALUES ('h1', ?, 'Hermes task', 1767270000, NULL, "
+                   "'hermes-model', NULL, 0)", (str(tmp_path),))
+        db.execute("CREATE TABLE messages (id, session_id, role, content, timestamp)")
+        db.execute("INSERT INTO messages VALUES (1, 'h1', 'user', 'Hermes question', 1767270000)")
+        db.execute("INSERT INTO messages VALUES (2, 'h1', 'assistant', ?, 1767270001)",
+                   (json.dumps([{"type": "text", "text": "Hermes answer"}]),))
+
+    entries, _ = history.scan(tmp_path)
+    found = {entry.source: entry for entry in entries if entry.source in {"amp-cli", "hermes-agent"}}
+    assert set(found) == {"amp-cli", "hermes-agent"}
+    assert [message["content"] for message in history.messages(found["amp-cli"])["messages"]] == [
+        "Amp question", "Amp answer",
+    ]
+    assert [message["content"] for message in history.messages(found["hermes-agent"])["messages"]] == [
+        "Hermes question", "Hermes answer",
+    ]
+
+
+def test_copilot_events_follow_working_directory_changes(history, tmp_path):
+    other = tmp_path / "other"
+    path = history.home / ".copilot/session-state/copilot1/events.jsonl"
+    write_jsonl(path, [
+        {"type": "session.start", "timestamp": "2026-01-01T00:00:00Z", "data": {
+            "sessionId": "copilot1", "selectedModel": "copilot-model",
+            "context": {"cwd": str(tmp_path)},
+        }},
+        {"type": "user.message", "timestamp": "2026-01-01T00:00:01Z",
+         "data": {"content": "Copilot question"}},
+        {"type": "assistant.message", "timestamp": "2026-01-01T00:00:02Z",
+         "data": {"content": "Copilot answer", "reasoningText": "private"}},
+        {"type": "session.context_changed", "timestamp": "2026-01-01T00:00:03Z",
+         "data": {"cwd": str(other)}},
+        {"type": "user.message", "timestamp": "2026-01-01T00:00:04Z",
+         "data": {"content": "Other workspace"}},
+    ])
+    entry = next(item for item in history.scan(tmp_path)[0] if item.source == "github-copilot")
+    assert entry.model == "copilot-model"
+    assert [message["content"] for message in history.messages(entry)["messages"]] == [
+        "Copilot question", "Copilot answer",
+    ]
+    other_entry = next(item for item in history.scan(other)[0] if item.source == "github-copilot")
+    assert [message["content"] for message in history.messages(other_entry)["messages"]] == [
+        "Other workspace",
+    ]
+
+
+def test_import_requires_preview_selection_and_stays_in_workspace(history_client, history, tmp_path):
+    exported = {"conversations": [
+        {"title": "Keep", "messages": [{"role": "user", "content": "Question"},
+                                          {"role": "assistant", "content": "Answer"}]},
+        {"title": "Skip", "messages": [{"role": "user", "content": "Other"}]},
+    ]}
+    payload = {"workspace_id": "one", "source_name": "ChatGPT", "export": exported,
+               "confirmed": False, "selected": []}
+    preview = history_client.post("/api/chat/history/import", json=payload)
+    assert preview.status_code == 200
+    assert [item["title"] for item in preview.json()["conversations"]] == ["Keep", "Skip"]
+    payload.update(confirmed=True, selected=[0], repository=str(tmp_path))
+    saved = history_client.post("/api/chat/history/import", json=payload)
+    assert saved.status_code == 200
+    assert saved.json()["imported"] == 1
+    assert history_client.post("/api/chat/history/import", json=payload).json()["imported"] == 0
+    entries, _ = history.scan(tmp_path)
+    imported = next(entry for entry in entries if entry.source == "imports")
+    assert imported.model == "ChatGPT"
+    assert [message["content"] for message in history.messages(imported)["messages"]] == [
+        "Question", "Answer",
+    ]
+    assert not [entry for entry in history.scan(tmp_path / "other")[0] if entry.source == "imports"]
+
+
+def test_chatgpt_export_uses_only_visible_active_branch():
+    exported = {"title": "Branch", "current_node": "answer", "mapping": {
+        "root": {"parent": None, "message": None},
+        "question": {"parent": "root", "message": {"author": {"role": "user"},
+            "content": {"content_type": "text", "parts": ["Question"]}}},
+        "hidden": {"parent": "question", "message": {"author": {"role": "assistant"},
+            "content": {"content_type": "text", "parts": ["Hidden"]}, "channel": "analysis"}},
+        "answer": {"parent": "question", "message": {"author": {"role": "assistant"},
+            "content": {"content_type": "text", "parts": ["Answer"]}, "channel": "final"}},
+    }}
+    assert [message["content"] for message in parse_export(exported)[0]["messages"]] == [
+        "Question", "Answer",
+    ]
 
 
 def test_unreadable_source_does_not_hide_other_sources(history, tmp_path):
@@ -203,6 +383,14 @@ def test_history_ui_has_source_and_privacy_controls(history_client):
     for name in ("chat-history-list", "chat-history-source", "chat-history-search", "chat-history-sources", "chat-history-detail"):
         assert f'id="{name}"' in page
     assert "Imported history is read-only and is never included in new chats." in page
+    for name in ("chat-import-form", "chat-import-source", "chat-import-file", "chat-import-selection"):
+        assert f'id="{name}"' in page
     script = history_client.get("/assets/chat.js").text
     assert "if (request !== detailRequest) return" in script
     assert "if (selectedHistory) return" in script
+    open_history = script[script.index("async function openHistory"):script.index("async function loadTools")]
+    assert "list.scrollTop = 0" not in open_history
+    assert "displayMessages(body.messages)" in open_history
+    import_script = history_client.get("/assets/chat-import.js").text
+    assert 'confirmed: true, selected' in import_script
+    assert 'new TextEncoder().encode(serialized).length' in import_script

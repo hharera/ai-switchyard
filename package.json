@@ -1,5 +1,5 @@
 {
-  "name": "switchyard",
+  "name": "ai-switchyard",
   "version": "0.1.0",
   "description": "Subscription-first engineering orchestration through stable 9router combos",
   "type": "module",
@@ -39,5 +39,13 @@
     "orchestration",
     "ai-agents"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hharera/ai-switchyard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hharera/ai-switchyard/issues"
+  },
+  "homepage": "https://github.com/hharera/ai-switchyard#readme",
   "license": "UNLICENSED"
 }

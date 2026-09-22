@@ -20,6 +20,7 @@
   let saving = false;
   let browsing = false;
   let browseRequest = null;
+  let gitDefaultsRequest = null;
   let browsedPath = "";
   let parentPath = null;
   let currentFolders = [];
@@ -118,17 +119,12 @@
     const selected = field("workflow").value;
     field("workflow").innerHTML = workflowOptions(selected);
     field("workflow").value = selected;
+    window.ThemeControls?.refreshSelect(field("workflow"));
     save.disabled = !ready || saving || !savedWorkflowConfig;
   }
 
   function setDispatchWorkflow(id) {
-    id = id || "";
-    const select = document.querySelector("#dispatch-workflow");
-    if (!Array.from(select.options).some(option => option.value === id)) {
-      select.add(new Option(`${id} (unavailable)`, id));
-    }
-    select.value = id;
-    updateDispatchWorkflowLabel();
+    renderDispatchWorkflowSelector(id || "");
   }
 
   function selectWorkspace(id) {
@@ -140,10 +136,10 @@
         : '<option value="">Add a workspace first</option>';
       select.value = activeId || "";
       select.disabled = !ready || !config.workspaces.length;
+      window.ThemeControls?.refreshSelect(select);
     });
     try { localStorage.setItem("switchyard.workspace", activeId || ""); } catch { /* Selection still works without storage. */ }
     repositoryInput.value = workspace?.repository || "";
-    document.querySelector("#active-workspace-path").textContent = workspace?.repository || "No workspace selected. Add one in Workspaces.";
     document.querySelector("#dispatch-workspace-settings").textContent = workspace
       ? `${workspace.repository} | ${workspace.forks_per_ticket} attempts per ticket | ${workspace.command_timeout_seconds}s command timeout`
       : "Add a workspace before dispatching.";
@@ -152,6 +148,7 @@
       setDispatchWorkflow(workspace.workflow_id);
       renderDelivery("dispatch", workspace.delivery);
     } else {
+      setDispatchWorkflow(null);
       renderDelivery("dispatch", localDelivery);
     }
     submitButton.disabled = !workspace;
@@ -170,6 +167,7 @@
   }
 
   function editWorkspace(id = null) {
+    cancelGitDefaults();
     editingId = id;
     const workspace = config.workspaces.find(item => item.id === id);
     field("editor-title").textContent = workspace ? `Edit ${workspace.name}` : "Add workspace";
@@ -178,6 +176,7 @@
     const workflow = workspace ? workspace.workflow_id || "" : savedWorkflowConfig?.default_workflow_id || "";
     field("workflow").innerHTML = workflowOptions(workflow);
     field("workflow").value = workflow;
+    window.ThemeControls?.refreshSelect(field("workflow"));
     field("forks").value = workspace?.forks_per_ticket || 3;
     field("timeout").value = workspace?.command_timeout_seconds || 1800;
     field("git-base").value = workspace?.git_base_branch || "main";
@@ -186,9 +185,68 @@
     document.querySelector("#remove-workspace").hidden = !workspace;
     error.textContent = "";
     status.textContent = workspace ? "Saved settings loaded. Edits apply only after saving." : "Save this workspace to use it in Dispatch, Git, and Runs.";
+    if (!workspace && field("repository").value.trim()) loadGitDefaults({quiet: true});
+  }
+
+  function cancelGitDefaults() {
+    gitDefaultsRequest?.abort();
+    gitDefaultsRequest = null;
+    document.querySelector("#load-workspace-git-defaults").disabled = saving;
+  }
+
+  async function loadGitDefaults({quiet = false} = {}) {
+    cancelGitDefaults();
+    if (saving) return;
+    const path = field("repository").value.trim();
+    if (!path) {
+      if (!quiet) error.textContent = "Choose a repository folder before loading Git settings.";
+      return;
+    }
+    const controller = new AbortController();
+    gitDefaultsRequest = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const button = document.querySelector("#load-workspace-git-defaults");
+    button.disabled = true;
+    error.textContent = "";
+    status.textContent = "Reading local Git settings...";
+    try {
+      const response = await fetch("/api/repository/git-defaults", {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "X-Switchyard-Client": "local-ui"},
+        body: JSON.stringify({path}),
+        signal: controller.signal,
+      });
+      const body = await response.json();
+      if (gitDefaultsRequest !== controller || path !== field("repository").value.trim()) return;
+      if (!response.ok) throw new Error(message(body) || "Unable to read Git settings from this repository.");
+      if (body.base_branch) {
+        field("git-base").value = body.base_branch;
+        document.querySelector("#workspace-delivery-base").value = body.base_branch;
+      }
+      if (body.remote) document.querySelector("#workspace-delivery-remote").value = body.remote;
+      status.textContent = body.remote && body.base_branch
+        ? `Loaded remote ${body.remote} and base branch ${body.base_branch}. Save the workspace to apply these settings.`
+        : body.remote
+          ? `Loaded remote ${body.remote}. No base branch was detected; check it manually before saving.`
+          : body.base_branch
+            ? `Loaded base branch ${body.base_branch}. No Git remote was found; check it manually before saving.`
+            : "No remote or base branch was found. Enter delivery settings manually.";
+    } catch (failure) {
+      if (gitDefaultsRequest !== controller) return;
+      const note = controller.signal.aborted ? "Git lookup timed out. Retry or enter settings manually." : failure.message;
+      if (!quiet) error.textContent = note;
+      status.textContent = quiet ? note : "";
+    } finally {
+      clearTimeout(timeout);
+      if (gitDefaultsRequest === controller) {
+        gitDefaultsRequest = null;
+        button.disabled = false;
+      }
+    }
   }
 
   async function persist(candidate, selectedId) {
+    cancelGitDefaults();
     saving = true;
     editor.querySelectorAll("button").forEach(button => { button.disabled = true; });
     document.querySelector("#new-workspace").disabled = true;
@@ -227,14 +285,17 @@
     else if (candidate.default_workspace_id === id) candidate.default_workspace_id = candidate.workspaces.find(item => item.id !== id)?.id || id;
     persist(candidate, id);
   });
-  editor.addEventListener("input", () => { status.textContent = "Unsaved workspace changes"; });
+  editor.addEventListener("input", () => { cancelGitDefaults(); status.textContent = "Unsaved workspace changes"; });
   document.querySelector("#new-workspace").addEventListener("click", () => { editWorkspace(); field("name").focus(); });
   document.querySelector("#cancel-workspace").addEventListener("click", () => editWorkspace(editingId));
   document.querySelector("#copy-workspace-delivery").addEventListener("click", () => {
+    cancelGitDefaults();
     if (!deliveryDefaults) { error.textContent = "Global delivery defaults are unavailable. Reload or configure delivery below."; return; }
     renderDelivery("workspace", deliveryDefaults);
     status.textContent = "Global delivery defaults copied. Save the workspace to apply them.";
   });
+  document.querySelector("#load-workspace-git-defaults").addEventListener("click", () => loadGitDefaults());
+  field("repository").addEventListener("change", () => loadGitDefaults({quiet: true}));
   document.querySelector("#workspace-list").addEventListener("click", event => {
     if (saving) return;
     const edit = event.target.closest("[data-edit-workspace]");
@@ -282,7 +343,7 @@
     if (!browsedPath) return;
     field("repository").value = browsedPath;
     error.textContent = "";
-    status.textContent = "Folder selected. Save to keep this workspace.";
+    loadGitDefaults({quiet: true});
     folderDialog.close();
   });
   document.querySelector("#folder-browser-cancel").addEventListener("click", () => folderDialog.close());
@@ -309,6 +370,6 @@
       const recent = await fetch("/api/jobs").then(response => response.ok ? response.json() : []);
       const paths = [...new Set([stored("switchyard.repository"), ...recent.map(item => item.repository)].filter(Boolean))];
       field("recent-paths").innerHTML = paths.map(path => `<option value="${escapeHtml(path)}"></option>`).join("");
-    } catch (failure) { error.textContent = failure.message; document.querySelector("#active-workspace-path").textContent = "Workspaces could not be loaded. Reload to retry."; }
+    } catch (failure) { error.textContent = failure.message; }
   })();
 })();

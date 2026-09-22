@@ -52,18 +52,28 @@ class WorkflowStep(StrictModel):
 
 class WorkflowRecipe(StrictModel):
     name: str = Field(default="Default engineering route", min_length=1, max_length=100)
+    isolated_worktree: bool = True
     steps: list[WorkflowStep]
 
     def require_executable(self, *, plan_only: bool = False) -> None:
-        """Allow free-form saved routes without silently ignoring their order at runtime."""
+        """Require the phases consumed by the dependency-aware engineering runner."""
         kinds = [step.kind for step in self.steps]
         if plan_only:
             if kinds.count("plan") != 1:
                 raise ValueError("Planning requires exactly one plan step in the workflow")
-        elif kinds != list(REQUIRED_KINDS):
+            return
+
+        missing = [kind for kind in REQUIRED_KINDS if kind not in kinds]
+        duplicates = [kind for kind in REQUIRED_KINDS if kinds.count(kind) > 1]
+        if missing or duplicates:
+            problems = []
+            if missing:
+                problems.append(f"Add: {', '.join(missing)}")
+            if duplicates:
+                problems.append(f"remove repeated: {', '.join(duplicates)}")
             raise ValueError(
-                "This workflow is saved, but the engineering runner currently requires "
-                f"one step of each type in this order: {', '.join(REQUIRED_KINDS)}"
+                "Full dispatch needs exactly one step of each type. "
+                f"{'; '.join(problems)}."
             )
 
     def step(self, kind: StepKind) -> WorkflowStep:
@@ -80,6 +90,7 @@ class WorkflowStepBinding(StrictModel):
 class WorkflowDefinition(StrictModel):
     id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
     name: str = Field(min_length=1, max_length=100)
+    isolated_worktree: bool = True
     steps: list[WorkflowStepBinding]
 
 
@@ -126,7 +137,11 @@ class WorkflowConfiguration(StrictModel):
                     system_prompt=binding.system_prompt or template.system_prompt,
                 )
             )
-        return WorkflowRecipe(name=workflow.name, steps=resolved)
+        return WorkflowRecipe(
+            name=workflow.name,
+            isolated_worktree=workflow.isolated_worktree,
+            steps=resolved,
+        )
 
 
 class StepCatalog(StrictModel):
@@ -171,6 +186,7 @@ def default_configuration() -> WorkflowConfiguration:
             WorkflowDefinition(
                 id="default",
                 name="Default engineering route",
+                isolated_worktree=True,
                 steps=[WorkflowStepBinding(step_id=step.id) for step in steps],
             )
         ],
@@ -189,6 +205,7 @@ def configuration_from_recipe(recipe: WorkflowRecipe) -> WorkflowConfiguration:
             WorkflowDefinition(
                 id="default",
                 name=recipe.name,
+                isolated_worktree=recipe.isolated_worktree,
                 steps=[WorkflowStepBinding(step_id=step.id) for step in recipe.steps],
             )
         ],
@@ -197,6 +214,8 @@ def configuration_from_recipe(recipe: WorkflowRecipe) -> WorkflowConfiguration:
 
 
 class WorkflowStore:
+    """Shared workflow library; repositories and workspaces are bound only at dispatch."""
+
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or data_dir() / "workflow.json"
         self.lock = threading.RLock()

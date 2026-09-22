@@ -14,6 +14,7 @@ for (const [command, args] of [
   [process.execPath, ["--check", join(projectRoot, "scripts", "install-python.js")]],
   [process.execPath, ["--test", join(projectRoot, "tests", "npm.test.js")]],
   [process.execPath, ["--test", join(projectRoot, "tests", "python-runtime.test.js")]],
+  [process.execPath, ["--test", join(projectRoot, "tests", "worktrees.test.js")]],
 ]) {
   const result = spawnSync(command, args, { cwd: projectRoot, stdio: "inherit" });
   if (result.error) {
