@@ -5,6 +5,11 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: Git ref to verify for a release
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -23,6 +28,8 @@ jobs:
         python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22

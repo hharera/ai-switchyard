@@ -96,11 +96,13 @@ confirmed in CI before claiming those platforms are verified.
 2. Keep the MIT license metadata and `LICENSE` file consistent across the npm and Python packages.
 3. Keep versions in `package.json` and `pyproject.toml` equal. Run `npm test`,
    `npm run test:install`, and `npm run release:check` before releasing.
-4. Configure the repository secret `NPM_TOKEN` with permission to publish the chosen package.
-   Use a narrowly scoped, short-lived npm token and review the repository's Actions permissions.
-5. Publish a GitHub release tagged `v<version>`, or manually run **Publish npm package** in Actions.
-   That workflow waits for all cross-platform CI jobs, validates release metadata and the release
-   tag when present, then publishes with npm provenance.
+4. Configure the repository secret `NPM_TOKEN` with permission to publish `openswitch`.
+   Use a narrowly scoped npm automation token. The publish job uses the `npm` GitHub
+   environment; add required reviewers there if releases need approval.
+5. Push an immutable tag `v<version>` matching both package manifests. Publish a GitHub release
+   from that tag, or run **Publish npm package** in Actions and enter the existing tag.
+   Both paths test that exact tag on Windows, macOS, and Linux, reject a version already on npm,
+   and publish with npm provenance. A tag cannot be reused for a different build.
 
 Version 0.1.1 has not been published yet. The metadata guard checks required fields, not npm ownership
 or legal rights; the release owner must verify both. No PyPI publication or native installers are

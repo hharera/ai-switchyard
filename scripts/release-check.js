@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+const pyproject = readFileSync(join(root, "pyproject.toml"), "utf8");
 const problems = [];
+const pythonVersion = pyproject.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+if (pkg.version !== pythonVersion) problems.push("Keep package.json and pyproject.toml versions equal before publishing.");
 if (pkg.name === "switchyard") problems.push("Choose an npm package name/scope you own; unscoped switchyard is already taken.");
 if (!pkg.license || pkg.license === "UNLICENSED" || !existsSync(join(root, "LICENSE"))) {
   problems.push("Choose the distribution license, set package.json license, and add the matching LICENSE file.");

@@ -2,23 +2,43 @@ name: Publish npm package
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example, v0.1.1)
+        required: true
+        type: string
   release:
     types: [published]
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   verify:
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
     permissions:
       contents: read
   publish:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: npm
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -27,14 +47,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -e ".[dev]"
-      - run: npm run release:check
-      - name: Check release tag matches the package version
-        if: github.event_name == 'release'
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: node -e "if (process.env.RELEASE_TAG !== 'v' + require('./package.json').version) process.exit(1)"
-      - run: npm test
-      - run: npm publish --access public --provenance
+      - name: Install publish-time test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Validate release metadata and tag
+        run: |
+          npm run release:check
+          node -e "if (process.env.RELEASE_TAG !== 'v' + require('./package.json').version) { console.error('Release tag must match package.json version'); process.exit(1) }"
+      - name: Confirm version is not already on npm
+        run: |
+          node -e "const {execFileSync}=require('node:child_process'); const p=require('./package.json'); let versions; try { versions=JSON.parse(execFileSync('npm',['view',p.name,'versions','--json'],{encoding:'utf8'})) } catch (error) { console.error('Could not check published versions'); process.exit(1) } if ([versions].flat().includes(p.version)) { console.error(p.name+'@'+p.version+' is already published'); process.exit(1) }"
+      - name: Publish to npm with provenance
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

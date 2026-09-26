@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ninerouter_orchestrator.adapters.nine_router import NineRouterExecutor
+from ninerouter_orchestrator.adapters.codex import CodexAdapter
 from ninerouter_orchestrator.config import Settings
 from ninerouter_orchestrator.orchestrator import EngineeringOrchestrator
 from ninerouter_orchestrator.process import ProcessError
@@ -52,8 +53,8 @@ def test_saved_order_repeated_categories_and_tool_routing(monkeypatch, tmp_path,
         calls.append((steps[index].id, combo))
         return f"output-{index}"
 
-    monkeypatch.setattr(instance.planner, "execute", execute)
-    monkeypatch.setattr(instance.executor, "run", execute)
+    monkeypatch.setattr(CodexAdapter, "execute", lambda self, prompt, *, cwd: execute(prompt, cwd=cwd))
+    monkeypatch.setattr(instance.executor, "run_model", lambda prompt, *, cwd, model, effort=None: execute(prompt, cwd=cwd, combo=model.removeprefix("9router/")))
     result = instance.run("Do the requested work")
 
     assert result["status"] == "completed", result.get("error")
@@ -93,7 +94,7 @@ def test_tool_failure_preserves_output_and_worktree_and_stops_later_steps(monkey
             raise RuntimeError("Tool unavailable")
         return "First step complete"
 
-    monkeypatch.setattr(instance.planner, "execute", execute)
+    monkeypatch.setattr(CodexAdapter, "execute", lambda self, prompt, *, cwd: execute(prompt, cwd=cwd))
     result = instance.run("Test failure handling")
     assert result["status"] == "failed"
     assert result["error"] == "Tool unavailable"
@@ -122,7 +123,7 @@ def test_dynamic_route_preserves_dirty_original_checkout(monkeypatch, tmp_path):
         (cwd / "tracked.txt").write_text("agent change")
         return "Updated"
 
-    monkeypatch.setattr(instance.planner, "execute", execute)
+    monkeypatch.setattr(CodexAdapter, "execute", lambda self, prompt, *, cwd: execute(prompt, cwd=cwd))
     result = instance.run("Apply a change")
     assert result["status"] == "completed"
     assert instance.repository.git("status", "--porcelain").stdout == before
@@ -169,7 +170,7 @@ def test_followup_run_starts_from_previous_run_commit(monkeypatch, tmp_path):
 def test_dynamic_route_rejects_dirty_direct_checkout_before_tools(monkeypatch, tmp_path):
     instance = runner(monkeypatch, tmp_path, [step("only")], isolated=False)
     (instance.repository.root / "local.txt").write_text("keep")
-    monkeypatch.setattr(instance.planner, "execute", lambda *args, **kwargs: pytest.fail("No tool"))
+    monkeypatch.setattr(CodexAdapter, "execute", lambda *args, **kwargs: pytest.fail("No tool"))
     result = instance.run("Apply a change")
     assert result["status"] == "failed"
     assert "local changes" in result["error"]
@@ -184,7 +185,7 @@ def test_auto_tools_rotate_without_changing_step_order(monkeypatch, tmp_path):
         calls.append(combo)
         return combo
 
-    monkeypatch.setattr(instance.executor, "run", execute)
+    monkeypatch.setattr(instance.executor, "run_model", lambda prompt, *, cwd, model, effort=None: execute(prompt, cwd=cwd, combo=model.removeprefix("9router/")))
     result = instance.run("Route through configured tools")
     assert result["status"] == "completed"
     assert calls == ["One", "Two", "One", "Two"]

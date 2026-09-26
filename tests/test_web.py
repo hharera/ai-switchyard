@@ -309,7 +309,7 @@ def test_dispatch_can_run_with_or_without_a_saved_workflow(monkeypatch, tmp_path
     })
     assert bypass.status_code == 202
     assert bypass.json()["workflow_id"] is None
-    assert len(bypass.json()["workflow"]["steps"]) == 6
+    assert len(bypass.json()["workflow"]["steps"]) == 4
     missing = client.post("/api/jobs", json={
         "repository": str(tmp_path), "request": "Create a safe implementation plan",
         "allow_host_execution": True, "workflow_id": "missing",
@@ -576,7 +576,7 @@ def test_steps_and_workflows_are_separate_global_resources(monkeypatch, tmp_path
     config = client.get("/api/workflows").json()
     assert config["default_workflow_id"] == "default"
     assert len(config["steps"]) == 6
-    config["workflows"][0]["steps"][5]["engine"] = "9router/Kimi"
+    config["workflows"][0]["steps"][-1]["engine"] = "9router/Kimi"
     response = client.put(
         "/api/workflows",
         json={
