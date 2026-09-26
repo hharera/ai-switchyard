@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from ..cli_config import CliProfile
 from ..mcp_config import ToolMcpConfig
 from ..models import ExecutionRequest
-from ..process import ProcessError, run_process
+from ..process import ProcessError, run_process, stream_process
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
@@ -84,7 +84,21 @@ class NineRouterExecutor:
             raise ProcessError(f"9router combo is not available to OpenCode: {combo}")
 
     def execute(self, request: ExecutionRequest) -> str:
-        prompt = self._prompt(request)
+        return self.run(self._prompt(request), cwd=request.workspace, combo=request.combo)
+
+    def run(self, prompt: str, *, cwd: Path, combo: str) -> str:
+        return self.run_model(prompt, cwd=cwd, model=self.model_id(combo))
+
+    def run_model(
+        self,
+        prompt: str,
+        *,
+        cwd: Path,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> str:
+        model_args = ["--model", model] if model else []
+        effort_args = ["--variant", effort] if effort else []
         result = run_process(
             [
                 *self.cli.command,
@@ -92,19 +106,26 @@ class NineRouterExecutor:
                 "--auto",
                 "--format",
                 "json",
-                "--model",
-                self.model_id(request.combo),
+                *model_args,
+                *effort_args,
                 "--dir",
-                str(request.workspace),
+                str(cwd),
                 prompt,
             ],
-            cwd=request.workspace,
+            cwd=cwd,
             timeout=self.timeout,
             env=self.runtime_env(),
         )
         if not result.passed:
             raise ProcessError(result.stderr.strip() or "9router execution failed")
-        return result.stdout
+        for line in result.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "error":
+                raise ProcessError("9router reported an error. Check the route and try again.")
+        return NineRouterReasoner._text_from_events(result.stdout)
 
     @staticmethod
     def _prompt(request: ExecutionRequest) -> str:
@@ -224,6 +245,53 @@ Task:
                 parts.append(str(part["text"]))
         return "\n".join(parts).strip()
 
+    def respond_stream(self, prompt: str, *, cwd: Path, emit) -> str:
+        """Stream OpenCode text, reasoning summaries, and read-only tool activity."""
+        permissions = {"*": "deny", "read": "allow", "glob": "allow", "grep": "allow"}
+        config = {
+            **self.cli.opencode_config(),
+            "permission": permissions,
+            "agent": {"plan": {"permission": permissions}},
+            "share": "disabled",
+        }
+        parts: list[str] = []
+
+        def handle(line: str) -> None:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                return
+            if not isinstance(event, dict):
+                return
+            if event.get("type") == "error":
+                raise ProcessError("9router reported an error")
+            part = event.get("part", event)
+            if not isinstance(part, dict):
+                return
+            kind = part.get("type")
+            text = str(part.get("text") or part.get("thinking") or "").strip()
+            if kind == "text" and text:
+                parts.append(text)
+                emit({"type": "delta", "content": text})
+            elif kind in {"reasoning", "thinking"} and text:
+                emit({"type": "thinking", "content": text})
+            elif kind in {"tool", "tool_use"}:
+                name = str(part.get("tool") or part.get("name") or "Workspace read")
+                detail = str(part.get("title") or part.get("state", {}).get("title") or name)
+                emit({"type": "step", "label": name[:80], "detail": detail[:500]})
+
+        stream_process(
+            [*self.cli.command, "run", "--pure", "--agent", "plan", "--format", "json",
+             "--thinking", "--model", NineRouterExecutor.model_id(self.combo),
+             "--dir", str(cwd), prompt],
+            cwd=cwd,
+            timeout=self.timeout,
+            env={**self.shared_env, "OPENCODE_CONFIG_CONTENT": json.dumps(config),
+                 "OPENCODE_PERMISSION": json.dumps(permissions)},
+            on_line=handle,
+        )
+        return "\n".join(parts).strip()
+
     @staticmethod
     def _text_from_events(output: str) -> str:
         parts: list[str] = []
@@ -231,6 +299,8 @@ Task:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
                 continue
             part = event.get("part", event)
             if isinstance(part, dict) and part.get("type") == "text" and part.get("text"):

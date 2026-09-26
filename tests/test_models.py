@@ -16,6 +16,22 @@ def test_dependency_order_is_stable() -> None:
     assert [ticket.id for ticket in plan.dependency_order()] == ["A", "B"]
 
 
+def test_dependency_batches_group_only_independent_tickets() -> None:
+    plan = Plan(
+        objective="test",
+        tickets=[
+            Ticket(id="C", title="C", description="C", acceptance_criteria=["done"], dependencies=["A"]),
+            Ticket(id="B", title="B", description="B", acceptance_criteria=["done"]),
+            Ticket(id="A", title="A", description="A", acceptance_criteria=["done"]),
+            Ticket(id="D", title="D", description="D", acceptance_criteria=["done"], dependencies=["B", "C"]),
+        ],
+    )
+
+    assert [[ticket.id for ticket in batch] for batch in plan.dependency_batches()] == [
+        ["A", "B"], ["C"], ["D"]
+    ]
+
+
 def test_dependency_cycle_is_rejected_when_ordering() -> None:
     with pytest.raises(ValueError, match="cycle"):
         Plan(

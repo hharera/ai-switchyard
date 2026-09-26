@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     execution_combos: str = "OpenCode-Go,Kimi,OpenCode-Free"
     planner_model: str | None = None
     reviewer_model: str | None = None
-    forks_per_ticket: int = Field(default=3, ge=1, le=5)
+    forks_per_ticket: int = Field(default=1, ge=1, le=5)
+    max_parallel_tickets: int = Field(default=1, ge=1, le=8)
     max_repair_rounds: int = Field(default=2, ge=0, le=5)
     command_timeout_seconds: int = Field(default=1800, ge=30)
     state_dir_name: str = ".orchestrator"

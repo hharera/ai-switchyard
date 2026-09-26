@@ -25,7 +25,7 @@ const stepsForm = element("#steps-form");
 const stepsError = element("#steps-error");
 const escapeHtml = value => String(value ?? "").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 const availableCombos = ["OpenAI-High"];
-const template = (id, kind = "plan") => ({id, kind, name: id, engine: ["validate", "merge"].includes(kind) ? "deterministic" : "codex", system_prompt: `Prompt for ${id}`});
+const template = (id, kind = "plan") => ({id, kind, name: id, engine: "codex", system_prompt: `Prompt for ${id}`});
 let stepCatalog = [template("used"), template("unused"), template("gate", "validate")];
 const workflowConfig = {steps: structuredClone(stepCatalog), workflows: []};
 const savedWorkflowConfig = {workflows: [{name: "Saved route", steps: [{step_id: "used"}]}]};
@@ -53,9 +53,9 @@ function editedRow(index, fields) {
   let html = element("#step-catalog").innerHTML;
   assert.equal(element("#template-count").textContent, "3 templates");
   assert.match(html, /Used in 1 saved workflow/);
-  assert.match(html, /Code safety gate/);
-  assert.match(html, /id="step-engine-2"[^>]*disabled/);
-  assert.match(html, /id="step-prompt-2"[^>]*readonly/);
+  assert.match(html, /AI agent/);
+  assert.doesNotMatch(html, /deterministic|Code safety gate|readonly|disabled/);
+  assert.match(html, /<input id="step-kind-2"[^>]*aria-describedby="step-kind-help-2"/);
   assert.match(html, /id="step-prompt-0"[^>]*aria-describedby="step-prompt-help-0"/);
 
   // Saved references still protect a template while its workflow has draft edits.
@@ -67,9 +67,9 @@ function editedRow(index, fields) {
   rows = [editedRow(1, {name: "Edited template", system_prompt: "Keep my draft", kind: "merge"})];
   stepsForm.handlers.change(fieldEvent("kind", 1, "merge"));
   rows = [];
-  assert.equal(stepCatalog[1].engine, "deterministic");
+  assert.equal(stepCatalog[1].engine, "codex");
   assert.equal(stepCatalog[1].system_prompt, "Keep my draft");
-  assert.equal(element("#step-kind-1-control").focused, true);
+  assert.equal(element("#step-kind-1").focused, true);
   assert.match(element("#steps-save-status").textContent, /Unsaved/);
 
   rows = [editedRow(1, {kind: "execute"})];

@@ -100,6 +100,75 @@ def test_running_job_renders_streamed_progress_and_candidate_state():
     assert "Candidate results" in output
 
 
+def test_dynamic_run_prioritizes_request_response_and_file_changes():
+    script = Path("src/ninerouter_orchestrator/web_assets/run-details.js").read_text(
+        encoding="utf-8"
+    )
+    job = {
+        "id": "dispatch-friendly",
+        "status": "completed",
+        "repository": "/repo/Gaylak",
+        "request": "Make run details easier to understand",
+        "workflow": {"name": "Direct Change", "steps": [
+            {"name": "Implement Changes", "engine": "9router/OpenAI-Medium"},
+        ]},
+        "result": {
+            "run_id": "run-friendly",
+            "base": "abc123",
+            "commit": "def4567890",
+            "steps": [{
+                "name": "Implement Changes",
+                "engine": "9router/OpenAI-Medium",
+                "status": "completed",
+                "output": "Updated the drawer and added regression coverage.",
+            }],
+            "changes": {
+                "file_count": 2,
+                "additions": 34,
+                "deletions": 8,
+                "files": [
+                    {"status": "M", "path": "web/run-details.js", "additions": 28, "deletions": 8},
+                    {"status": "A", "path": "tests/run-details.test.js", "additions": 6, "deletions": 0},
+                ],
+            },
+        },
+    }
+    output = subprocess.check_output(
+        ["node", "-e", script + "\nconsole.log(renderRunDetails(" + json.dumps(job) + "));"],
+        text=True,
+        encoding="utf-8",
+    )
+
+    for value in (
+        "Request and response",
+        "You asked",
+        "Make run details easier to understand",
+        "Updated the drawer and added regression coverage.",
+        "Changes made",
+        "web/run-details.js",
+        "tests/run-details.test.js",
+        "+34",
+        "-8",
+        "Step details",
+        "Technical details",
+    ):
+        assert value in output
+    assert output.index("Request and response") < output.index("Technical details")
+
+
+def test_followup_run_links_back_to_parent_dispatch():
+    script = Path("src/ninerouter_orchestrator/web_assets/run-details.js").read_text(
+        encoding="utf-8"
+    )
+    output = subprocess.check_output(
+        ["node", "-e", script + '\nconsole.log(renderRunDetails({'
+         'id:"child",followup_of:"parent-1",status:"completed",result:{}}));'],
+        text=True, encoding="utf-8",
+    )
+    assert "Follow-up run" in output
+    assert 'data-related-job="parent-1"' in output
+
+
 def test_run_drawer_uses_event_stream_with_polling_fallback():
     script = Path("src/ninerouter_orchestrator/web_assets/app.js").read_text(encoding="utf-8")
     page = Path("src/ninerouter_orchestrator/web_assets/index.html").read_text(encoding="utf-8")

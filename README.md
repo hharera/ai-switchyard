@@ -2,20 +2,24 @@
 
 Switchyard is packaged for Windows, macOS, and Linux through npm while its orchestration engine
 remains Python. The npm installer creates an isolated Python environment inside the package,
-installs the engine, and exposes the `switchyard` command.
+installs the engine, and exposes the `openswitch` and `switchyard` commands in version 0.1.1.
 
 ## Public installation
 
-Public npm publication is prepared under the `openswitch` package name and the project is available
-under the MIT License. Run `npm run release:check` before publishing to verify the release metadata.
+The public npm package is named `openswitch` and is available under the MIT License.
+Version 0.1.0 uses the `switchyard` command; version 0.1.1 adds the `openswitch` alias.
 
-After the package is published, installation is the same on every platform:
+After version 0.1.1 is published, installation is the same on every platform:
 
 ```bash
-npm install --global openswitch
+npm install --global --allow-scripts=openswitch openswitch
+openswitch ui
+# The original command remains available:
 switchyard --help
-switchyard ui
 ```
+
+After installation, npm prints `openswitch ui`, the command that starts Switchyard and opens it in
+your default browser.
 
 | Platform | Requirements |
 | --- | --- |
@@ -27,11 +31,13 @@ The installer prefers a compatible Python on `PATH`, then searches versioned com
 `py` launchers without invoking a shell. If `SWITCHYARD_PYTHON` is set, it must be an absolute path to an existing Python environment
 where Switchyard is already installed; the npm installer verifies it and does not modify it.
 Installation needs network access to download Python dependencies from PyPI.
+The `--allow-scripts=openswitch` option authorizes the Python setup script on npm versions
+that require explicit lifecycle-script permission.
 
 If npm lifecycle scripts were disabled, enable them and rebuild the installed package:
 
 ```bash
-npm rebuild --global openswitch
+npm rebuild --global --allow-scripts=openswitch openswitch
 ```
 
 Windows validation commands run through `cmd.exe`; macOS and Linux use Bash when available, with
@@ -70,7 +76,7 @@ Or build and install a portable npm tarball:
 
 ```bash
 npm pack
-npm install -g ./openswitch-0.1.0.tgz
+npm install -g --allow-scripts=openswitch ./openswitch-0.1.1.tgz
 ```
 
 Existing `orchestrate` and `orchestrate-ui` Python commands remain available for compatibility.
@@ -85,8 +91,8 @@ confirmed in CI before claiming those platforms are verified.
 
 ## Publishing a release
 
-1. Verify that the `openswitch` npm name is still available and that you have the right to use it.
-   The installed command remains `switchyard`.
+1. Verify that your npm account can publish `openswitch` and that the version is not already published.
+   The installed commands are `openswitch` and `switchyard`.
 2. Keep the MIT license metadata and `LICENSE` file consistent across the npm and Python packages.
 3. Keep versions in `package.json` and `pyproject.toml` equal. Run `npm test`,
    `npm run test:install`, and `npm run release:check` before releasing.
@@ -96,14 +102,14 @@ confirmed in CI before claiming those platforms are verified.
    That workflow waits for all cross-platform CI jobs, validates release metadata and the release
    tag when present, then publishes with npm provenance.
 
-This checkout has not been published. The metadata guard checks required fields, not npm ownership
+Version 0.1.1 has not been published yet. The metadata guard checks required fields, not npm ownership
 or legal rights; the release owner must verify both. No PyPI publication or native installers are
 configured. The supported distribution is an npm launcher with a locally created Python environment.
 
 ## Saved workspaces
 
 Use **Workspaces** to save a name, local Git repository path, default workflow,
-attempts per ticket, command timeout, Git comparison base, and delivery settings. Configuration is
+attempts per ticket, parallel ticket limit, command timeout, Git comparison base, and delivery settings. Configuration is
 stored in the platform data directory documented under Public installation. The active workspace is shared by
 Overview, Dispatch, Git, and Runs, and its selection is remembered in the browser. Previously used
 repository paths are suggested when adding a workspace; they are not saved automatically.
@@ -114,6 +120,13 @@ confirmation. Runs filters by workspace and includes older jobs with the same re
 Removing a workspace only removes its configuration, never repository files or run history.
 Workflows, step templates, MCPs, and CLI access are shared across all workspaces. A workspace's
 default workflow is only a reference to the shared library, never a workspace-owned copy.
+
+Open a completed dispatch in **Runs** and use **Follow up on this run** to continue its work.
+The follow-up creates a linked dispatch with the saved workflow, original objective, previous
+request, and recent response excerpts. Isolated workflows start from the previous run's committed
+result in a new worktree; direct workflows use the current clean workspace checkout. Confirm host
+execution again before sending. Follow-ups stay local and do not push or open pull requests.
+Running jobs must finish first; failed jobs require recovery of their preserved worktree.
 
 Saving a workspace initializes Git if its folder is not already a repository, using the configured
 Git comparison base as the initial branch. Saving alone does not stage or commit files.
@@ -131,11 +144,30 @@ Each workspace saves its delivery defaults: local only (the initial default), pu
 branch, or push and open a GitHub PR. Use **Copy global delivery defaults** in Workspaces to reuse
 the **Delivery** tab's settings. Dispatch can override these settings;
 each job saves its own snapshot. Branch names support `{run_id}` and `{repository}` placeholders.
-Only runs with an approved final review publish. Failed or unapproved runs never publish.
+Only completed workflows publish. Failed workflows never publish.
 Pushes are non-forced. PRs use authenticated `gh` and an explicit base branch, with draft enabled by
 default. A failed PR attempt records any successful push; local integration branches remain recoverable.
 These controls govern orchestrator delivery; agents are instructed not to publish independently,
 but host-executing agents and commands are not a security sandbox.
+
+## Pull request review
+
+The web console's **Pull requests** tab reads review queues from GitHub.com, GitLab.com, and
+Bitbucket Cloud using the active workspace's delivery remote. It shows the request description,
+discussion preview, changed files, approval count, and provider merge status. Comments, approvals,
+change requests, merges, closes, and reopens are available where the provider offers a guarded API.
+Every write requires an in-app confirmation and rechecks the request state and head commit first.
+Bitbucket merges and reopens stay on Bitbucket because those actions cannot use the same commit guard.
+
+For GitHub.com, install and authenticate the [GitHub CLI](https://cli.github.com/) with `gh auth login`.
+For GitLab.com, install and authenticate the [GitLab CLI](https://gitlab.com/gitlab-org/cli) with
+`glab auth login`. Switchyard detects either CLI and uses its local credential store without sending
+the token to the browser or saving it in workspace configuration. This is optional: set `GH_TOKEN` or
+`GITHUB_TOKEN`, `GITLAB_TOKEN`, or `BITBUCKET_TOKEN` in the Switchyard server environment instead.
+Set `BITBUCKET_EMAIL` as well when using a Bitbucket app password. Use a credential with the narrowest
+repository scope; the feature acts with that credential's provider identity and permissions. Bitbucket
+Cloud uses environment credentials because it has no equivalent first-party CLI. Self-hosted providers
+are not supported yet.
 
 A local, subscription-first orchestration MVP. Codex uses the existing ChatGPT login for planning and
 review. Repository-aware execution runs through OpenCode using stable `9router/<combo>` identifiers.
@@ -207,8 +239,8 @@ does not install, authenticate, or grant permission to use a tool.
 switchyard ui
 ```
 
-Open `http://127.0.0.1:8765`. The interface starts trusted workflow runs after explicit
-host-execution confirmation.
+The command opens `http://127.0.0.1:8765` in your default browser. The interface starts trusted
+workflow runs after explicit host-execution confirmation.
 
 ## Workspace commands
 
@@ -226,7 +258,7 @@ SwitchYard server stops its active commands. Saved output is limited to the most
 characters per command.
 
 Dispatches may run without selecting a saved workflow, which uses Switchyard's built-in engineering
-steps with no saved template overrides. Selecting a named workflow uses its configured phase
+steps with no saved template overrides. Selecting a named workflow uses its configured ordered
 templates, tools, prompts, and overrides. Every run records which path was chosen and keeps the
 resolved step snapshot.
 
@@ -236,9 +268,9 @@ updates future runs in every workspace that uses it; existing runs keep their sn
 
 Select **Steps** to configure independent, reusable step templates. The catalog has no execution
 order; **Workflows** reference templates by ID and arrange the route, with optional per-workflow
-overrides that leave the shared template unchanged. Planning, execution, candidate selection,
-and final review can use the Codex subscription or any available stable `9router` combo. Each AI
-stage has its own system prompt. Validation and merge remain deterministic safety gates. Every
+overrides that leave the shared template unchanged. Every step can use the Codex subscription or
+any available stable `9router` combo, and every step has its own system prompt. Step categories are
+descriptive labels rather than runner-controlled phases. Every
 dispatch stores a snapshot of the workflow recipe it used, so later global edits do not change existing runs.
 Switchyard reflects the live 9router combo registry every 15 seconds. Use **Refresh 9router** in
 the System panel or workflow editor for an immediate read. Added and removed combo names are
@@ -246,14 +278,10 @@ reported, and saved steps that reference a removed combo are flagged without bei
 Templates can be added independently. New workflows start with an empty route. Select **Edit
 workflow** to rename a saved workflow, add or remove templates, adjust overrides, and drag the
 step handles to change its order. Move-up/down buttons provide keyboard and touch alternatives.
-Each workflow can keep integration in an isolated worktree (the default) or apply selected candidate
-commits directly to the current branch of a clean repository checkout. Candidate attempts always use
-separate worktrees.
-Save changes to persist the route, or discard all unsaved workflow edits. Empty and partial routes
-can be saved as drafts. Full dispatch requires exactly one plan, execute, validate, select, merge,
-and review step. Complete workflows may arrange those steps freely in the editor; the engineering
-runner resolves their semantic dependencies when it executes them. Routes with a missing or repeated
-phase are rejected before execution.
+Each workflow can run in an isolated worktree (the default) or apply changes directly to the current
+branch of a clean repository checkout. Save changes to persist the route, or discard all unsaved
+workflow edits. Steps execute strictly in the saved order and may be repeated or omitted. An empty
+workflow is valid and completes without changing the repository.
 The field labeled system prompt is passed as stage instructions through the CLI task prompt;
 it does not replace the coding CLI's own system-level safety instructions.
 
@@ -261,19 +289,38 @@ it does not replace the coding CLI's own system-level safety instructions.
 
 ```text
 request
-  -> Codex planner
-  -> dependency-aware tickets
-  -> three isolated git worktrees per ticket
-  -> OpenCode -> 9router/<stable-combo>
-  -> deterministic validation
-  -> Codex candidate decision
-  -> dependency-first merge and integration tests
-  -> Codex final review
-  -> repair tickets -> 9router
+  -> ordered workflow step
+  -> selected Codex or OpenCode/9router tool
+  -> next configured step with prior output and current workspace
+  -> commit completed workspace changes
 ```
+
+Each step gets the original request and recent output excerpts; complete outputs are saved in the
+run record. A failed tool stops later steps and leaves the workspace available for inspection.
+There is no implicit planning, validation, selection, merge, or review step. Existing saved
+`deterministic` engines load as Codex-backed tools with their original prompts; select a different
+AI route in Steps if desired. Migration does not overwrite configuration until you save it.
+
+The legacy internal ticket coordinator remains available to existing integrations, but is not used
+by dispatch or `switchyard run`. The following ticket settings apply only to that legacy coordinator:
 
 The three execution attempts use different intents: implementation-first, robustness-first, and an
 alternative approach. Combo assignment rotates independently through the configured stable names.
+Tickets in the same dependency layer can run concurrently. Set `ORCH_MAX_PARALLEL_TICKETS`, or use
+the workspace's **Parallel tickets** setting, to cap them; the default is 1 and the maximum is 8.
+The CLI also accepts `--parallel-tickets`:
+
+```bash
+switchyard run --repo /path/to/repository --allow-host-execution --parallel-tickets 3 "Implement the requested feature"
+```
+
+Each bounded batch starts from the same integrated commit in separate worktrees. Candidate selection
+runs concurrently; selected commits are then integrated in stable ticket order with accumulated
+checks. Dependent tickets start only after the preceding dependency layer passes integration.
+The maximum number of simultaneous implementation agents is the parallel ticket limit multiplied
+by attempts per ticket. Use 1 for sequential tickets; attempts within each ticket still run in parallel.
+Failures stop later batches and final review; completed peer results and failed worktrees remain
+available for inspection. Merge conflicts stop the run without automatic conflict resolution.
 
 ## Local setup
 
@@ -348,25 +395,25 @@ workers and Postgres checkpoints are the next deployment step; Temporal remains 
   attached checkout and apply selected commits to its current branch.
 - Each executor has its own worktree, but can access host files: this is NOT a security sandbox.
 - Executors are instructed not to merge or commit; host execution cannot enforce that instruction.
-- Planner and reviewer Codex calls use a read-only sandbox.
+- Workflow Codex calls use a workspace-write sandbox; the standalone planning command is read-only.
 - No OpenAI API key is required or read.
 - Provider credentials remain in `9router` and OpenCode's existing configuration.
 
 ## Current implementation limits
 
 `switchyard run --repo /path/to/repository --allow-host-execution "request"` executes trusted
-tasks through candidate selection, integration checks, and final review. It preserves the original
+tasks through the configured sequence of AI steps. Isolated workflows preserve the original
 checkout and never pushes. Tests and agents can execute arbitrary host commands, so opt in only
-for trusted repositories and tasks. Runtime status is saved after each ticket; it is not resumable yet.
+for trusted repositories and tasks. Runtime status is saved after each step; it is not resumable yet.
 
 This is a foundation, not the full production spec. Automated repair, cross-candidate code synthesis,
 Docker execution isolation, Redis workers, Postgres checkpoints, and Langfuse tracing remain unwired.
 The LangGraph command displays topology only; unbound stages fail explicitly if invoked.
-The run command currently uses the deterministic Python coordinator. Review findings stop the run
-with `needs_repair` instead of claiming success. Compose services are optional and not started by setup.
+The run command uses a small Python coordinator to prepare the repository, call each configured AI
+tool, record outputs, and commit completed changes. Compose services are optional and not started by setup.
 No provider billing policy is enforced here: ensure your 9router combos contain only desired
 subscription-backed providers if you want to avoid usage-based charges.
 
-Completed runs automatically remove clean candidate and integration worktrees. Their Git branches
+Completed runs automatically remove clean workflow worktrees. Their Git branches
 remain available as recovery points. Worktrees containing uncommitted files are preserved and listed
 in the run record instead of being force-deleted.

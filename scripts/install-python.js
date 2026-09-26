@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, writeSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,19 @@ function run(command, args, hint) {
   });
   if (result.error || result.status !== 0) {
     throw new Error(`${hint}${result.error ? ` (${result.error.message})` : ""}`);
+  }
+}
+
+function showLaunchCommand() {
+  const message = "Switchyard is ready. Run `openswitch ui` to open the web interface.";
+  const terminal = process.platform === "win32" ? "\\\\.\\CONOUT$" : "/dev/tty";
+  try {
+    const descriptor = openSync(terminal, "w");
+    writeSync(descriptor, `${message}\n`);
+    closeSync(descriptor);
+  } catch {
+    // npm may capture lifecycle output; this still reaches foreground-script installs and CI logs.
+    console.log(message);
   }
 }
 
@@ -42,6 +55,7 @@ try {
     run(venvPython, ["-c", "import ninerouter_orchestrator.cli"],
       "Switchyard runtime verification failed. Reinstall the package.");
   }
+  showLaunchCommand();
 } catch (error) {
   console.error(`Switchyard setup failed: ${error.message}`);
   process.exitCode = 1;

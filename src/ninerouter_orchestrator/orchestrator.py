@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .adapters.codex import CodexAdapter
 from .adapters.nine_router import NineRouterExecutor, NineRouterReasoner
+from .adapters.workflow_tool import WORKFLOW_TOOL_SPECS, WorkflowToolAdapter
 from .cli_config import CliConfiguration
 from .config import Settings
 from .git import SWITCHYARD_GIT_CONFIG, GitRepository
@@ -78,6 +81,7 @@ class EngineeringOrchestrator:
         self.workflow = workflow or default_recipe()
         self.state_dir = settings.state_dir(repository.resolve())
         self.progress = progress
+        self._worktree_lock = threading.Lock()
 
     def _report(self, stage: str, run: dict | None = None) -> None:
         if not self.progress:
@@ -88,10 +92,9 @@ class EngineeringOrchestrator:
             logger.warning("Unable to publish workflow progress", exc_info=True)
 
     def preflight(self, *, plan_only: bool = False) -> None:
-        self.workflow.require_executable(plan_only=plan_only)
         self.repository.validate()
         self.repository.git("rev-parse", "HEAD")
-        steps = [self.workflow.step("plan")] if plan_only else self.workflow.steps
+        steps = self.workflow.steps[:1] if plan_only else self.workflow.steps
         if any(step.engine == "codex" for step in steps):
             profile = self.cli_config.codex
             if profile.base_url:
@@ -106,14 +109,26 @@ class EngineeringOrchestrator:
                     env=self.cli_config.runtime_env(),
                 )
         combos = {step.combo for step in steps if step.combo}
-        if any(step.engine == "9router/auto" for step in steps):
+        if any(step.rotates_combos for step in steps):
             combos.update(self.settings.combos)
         for combo in sorted(combos):
             self.executor.verify_combo(combo, cwd=self.repository.root)
+        statuses = self.cli_config.statuses()
+        profiles = {tool.id: tool for tool in self.cli_config.tools}
+        for step in steps:
+            if not step.engine.startswith("tool/"):
+                continue
+            tool_id = step.engine.removeprefix("tool/")
+            if tool_id not in WORKFLOW_TOOL_SPECS or tool_id not in profiles:
+                raise ProcessError(f"{step.name} uses an unsupported workflow tool: {tool_id}")
+            if not statuses.get(f"tool:{tool_id}", {}).get("command_available"):
+                raise ProcessError(f"{step.name} needs an installed {profiles[tool_id].name} command")
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def plan(self, request: str) -> Plan:
-        step = self.workflow.step("plan")
+        if not self.workflow.steps:
+            raise ValueError("The workflow has no step available for planning")
+        step = self.workflow.steps[0]
         prompt = f"""{self._step_prompt(step)}
 
 Inspect this repository and decompose the request
@@ -134,13 +149,16 @@ Request:
         combos = self.settings.combos if step.engine == "9router/auto" else (step.combo,)
         for index in range(self.settings.forks_per_ticket):
             fork_number = index + 1
-            workspace, _ = self.repository.create_worktree(
-                state_dir=self.state_dir,
-                run_id=run_id,
-                ticket_id=ticket.id,
-                fork_number=fork_number,
-                start_point=start_point,
-            )
+            # Git worktree registration mutates shared repository metadata. Keep that
+            # brief setup serialized while the agents themselves run concurrently.
+            with self._worktree_lock:
+                workspace, _ = self.repository.create_worktree(
+                    state_dir=self.state_dir,
+                    run_id=run_id,
+                    ticket_id=ticket.id,
+                    fork_number=fork_number,
+                    start_point=start_point,
+                )
             requests.append(
                 ExecutionRequest(
                     run_id=run_id,
@@ -176,6 +194,50 @@ Request:
                     f"({len(results)} of {len(requests)}): {results[-1].status}"
                 )
         return sorted(results, key=lambda result: result.request.fork_number)
+
+    def _execute_ticket_batch(
+        self, run: dict, tickets: list[Ticket], start_point: str
+    ) -> list[tuple[Ticket, list[ExecutionResult], CandidateDecision]]:
+        def execute_and_select(ticket: Ticket):
+            results = []
+            try:
+                results = self.execute_ticket(run["run_id"], ticket, start_point)
+                self._report(f"Selecting the best candidate for {ticket.id}")
+                return results, self.select_candidate(ticket, results), None
+            except Exception as exc:  # noqa: BLE001 - retain every peer's outcome.
+                return results, None, str(exc)
+
+        entries = {}
+        for ticket in tickets:
+            entry = {
+                "ticket": ticket.id, "status": "running", "start_point": start_point,
+                "candidates": [],
+            }
+            entries[ticket.id] = entry
+            run["tickets"].append(entry)
+        self.save_run(run)
+        completed = []
+        errors = []
+        workers = min(self.settings.max_parallel_tickets, len(tickets))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(execute_and_select, ticket): ticket for ticket in tickets}
+            for future in as_completed(futures):
+                ticket = futures[future]
+                results, decision, error = future.result()
+                entry = entries[ticket.id]
+                entry["candidates"] = [r.model_dump(mode="json") for r in results]
+                if error is not None:
+                    entry.update(status="failed", error=error)
+                    errors.append(f"{ticket.id}: {error}")
+                else:
+                    entry.update(status="ready", decision=decision.model_dump())
+                    completed.append((ticket, results, decision))
+                self.save_run(run)
+                self._report(f"{ticket.id}: subagent {entry['status']}", run)
+        if errors:
+            raise RuntimeError("Subagent execution failed: " + "; ".join(sorted(errors)))
+        positions = {ticket.id: index for index, ticket in enumerate(tickets)}
+        return sorted(completed, key=lambda item: positions[item[0].id])
 
     def _execute_fork(self, request: ExecutionRequest) -> ExecutionResult:
         self._report(f"{request.ticket.id}: candidate {request.fork_number} started")
@@ -268,7 +330,7 @@ Plan:
                 self.cli_tool_context,
                 (
                     "Do not push Git branches or create pull requests. Publishing is handled only by "
-                    "the orchestrator after final review using the dispatch delivery settings."
+                    "the orchestrator after the workflow using the dispatch delivery settings."
                 ),
             )
             if part
@@ -276,9 +338,16 @@ Plan:
 
     def _structured(self, step: WorkflowStep, prompt: str, schema, *, cwd: Path):
         if step.engine == "codex":
-            adapter = self.planner if step.kind == "plan" else self.reviewer
+            adapter = CodexAdapter(
+                timeout=self.settings.command_timeout_seconds,
+                model=step.model,
+                effort=step.effort,
+                mcps=self.mcp_config.for_tool("codex"),
+                cli=self.cli_config.codex,
+                shared_env=self.cli_config.runtime_env(),
+            )
             return adapter.structured(prompt, schema, cwd=cwd)
-        combo = self.settings.combos[0] if step.engine == "9router/auto" else step.combo
+        combo = self.settings.combos[0] if step.rotates_combos else step.combo
         if not combo:
             raise RuntimeError(f"{step.name} needs a 9router combo")
         return NineRouterReasoner(
@@ -289,7 +358,156 @@ Plan:
             shared_env=self.executor.shared_env,
         ).structured(prompt, schema, cwd=cwd)
 
-    def run(self, request: str) -> dict:
+    def _execute_workflow_step(
+        self, step: WorkflowStep, prompt: str, *, cwd: Path, index: int
+    ) -> str:
+        if step.engine == "codex":
+            return CodexAdapter(
+                timeout=self.settings.command_timeout_seconds,
+                model=step.model,
+                effort=step.effort,
+                mcps=self.mcp_config.for_tool("codex"),
+                cli=self.cli_config.codex,
+                shared_env=self.cli_config.runtime_env(),
+            ).execute(prompt, cwd=cwd)
+        if step.engine == "opencode" and step.configuration != "9router":
+            return self.executor.run_model(
+                prompt, cwd=cwd, model=step.model, effort=step.effort
+            )
+        if step.engine.startswith("tool/"):
+            tool_id = step.engine.removeprefix("tool/")
+            profile = next(tool for tool in self.cli_config.tools if tool.id == tool_id)
+            return WorkflowToolAdapter(
+                tool_id,
+                profile,
+                timeout=self.settings.command_timeout_seconds,
+                shared_env=self.cli_config.runtime_env(),
+            ).execute(prompt, cwd=cwd, model=step.model, effort=step.effort)
+        if step.rotates_combos and not self.settings.combos:
+            raise RuntimeError(f"{step.name} needs at least one 9router combo")
+        combo = (
+            self.settings.combos[index % len(self.settings.combos)]
+            if step.rotates_combos
+            else step.combo
+        )
+        if not combo:
+            raise RuntimeError(f"{step.name} needs a 9router combo")
+        return self.executor.run_model(
+            prompt,
+            cwd=cwd,
+            model=NineRouterExecutor.model_id(combo),
+            effort=step.effort,
+        )
+
+    def _record_changes(self, run: dict, workspace: Path, *, target: str | None = None) -> None:
+        try:
+            run["changes"] = self.repository.change_summary(
+                workspace, base=run["base"], target=target
+            )
+            run.pop("changes_error", None)
+        except Exception as exc:  # A display snapshot must not mask an agent failure.
+            run["changes_error"] = str(exc)
+
+    def run(self, request: str, *, start_point: str | None = None) -> dict:
+        """Run the configured agent calls in order, without interpreting step kinds."""
+        if not self.settings.allow_host_execution:
+            raise RuntimeError(
+                "Execution requires --allow-host-execution: worktrees are not sandboxes"
+            )
+        run = {
+            "run_id": uuid.uuid4().hex[:10],
+            "request": request,
+            "workflow": self.workflow.model_dump(),
+            "steps": [],
+            "status": "running",
+            "cleanup": {"removed": [], "preserved": []},
+        }
+        if start_point:
+            run["continued_from"] = start_point
+        self.save_run(run)
+        try:
+            if not self.workflow.steps:
+                run.update(status="completed", no_op=True)
+            else:
+                self._report("Preparing the repository", run)
+                run["repository_setup"] = self.repository.prepare_dispatch()
+                self._report("Checking providers", run)
+                self.preflight()
+                run["base"] = (
+                    self.repository.git("rev-parse", "--verify", f"{start_point}^{{commit}}")
+                    .stdout.strip()
+                    if start_point
+                    else self.repository.head()
+                )
+                if self.workflow.isolated_worktree:
+                    workspace, branch = self.repository.create_worktree(
+                        state_dir=self.state_dir, run_id=run["run_id"],
+                        ticket_id="workflow", fork_number=0, start_point=run["base"],
+                    )
+                else:
+                    self.repository.require_clean_checkout()
+                    branch = self.repository.current_branch()
+                    workspace = self.repository.root
+                run.update(workspace=str(workspace), integration_branch=branch,
+                           isolated_worktree=self.workflow.isolated_worktree)
+                for index, step in enumerate(self.workflow.steps):
+                    entry = {"index": index, "step_id": step.id, "name": step.name,
+                             "kind": step.kind, "engine": step.engine, "status": "running",
+                             "started_at": datetime.now(UTC).isoformat()}
+                    prior_outputs = [
+                        {"name": item["name"], "output": item["output"][-4000:]}
+                        for item in run["steps"][-5:]
+                    ]
+                    run["steps"].append(entry)
+                    prompt = f"""{self._step_prompt(step)}
+
+Carry out this workflow step in the current workspace. Follow repository instructions.
+The step category is descriptive; follow the instructions above, not a fixed phase contract.
+Earlier steps used this same workspace. Do not create commits or push branches; changes will be
+committed after the workflow completes.
+
+Original request:
+{request}
+
+Recent previous step output excerpts:
+{json.dumps(prior_outputs, ensure_ascii=False)}
+
+The complete outputs are in the run record at:
+{self.state_dir / 'runs' / (run['run_id'] + '.json')}
+"""
+                    entry["request"] = prompt
+                    self.save_run(run)
+                    self._report(f"Step {index + 1} of {len(self.workflow.steps)}: {step.name}", run)
+                    try:
+                        output = self._execute_workflow_step(
+                            step, prompt, cwd=workspace, index=index
+                        )
+                        entry.update(status="completed", output=output)
+                    except Exception as exc:
+                        entry.update(status="failed", error=str(exc))
+                        raise
+                    finally:
+                        entry["finished_at"] = datetime.now(UTC).isoformat()
+                        self._record_changes(run, workspace)
+                    self.save_run(run)
+                    self._report(f"Completed: {step.name}", run)
+                run["commit"] = self.repository.commit_all(
+                    workspace, f"Switchyard: {self.workflow.name} ({run['run_id']})"
+                )
+                self._record_changes(run, workspace, target=self.repository.git(
+                    "rev-parse", "HEAD", cwd=workspace
+                ).stdout.strip())
+                run["status"] = "completed"
+                if self.workflow.isolated_worktree:
+                    self._cleanup_worktree(run, workspace)
+        except Exception as exc:  # noqa: BLE001 - retain outputs and worktrees on failure.
+            run.update(status="failed", error=str(exc))
+        self.save_run(run)
+        self._report("Run stopped" if run["status"] == "failed" else "Workflow finished", run)
+        return run
+
+    def _run_engineering(self, request: str) -> dict:
+        """Legacy ticket coordinator; dispatch uses the dynamic run method."""
         if not self.settings.allow_host_execution:
             raise RuntimeError(
                 "Execution requires --allow-host-execution: worktrees are not sandboxes"
@@ -322,60 +540,62 @@ Plan:
             tickets=[],
             status="running",
             cleanup={"removed": [], "preserved": []},
+            max_parallel_tickets=self.settings.max_parallel_tickets,
         )
         checks: list[str] = []
         try:
             ordered_tickets = plan.dependency_order()
-            for index, ticket in enumerate(ordered_tickets, start=1):
-                if not ticket.validation_commands:
-                    raise RuntimeError(f"{ticket.id} needs explicit validation commands")
-                start = self.repository.git("rev-parse", "HEAD", cwd=workspace).stdout.strip()
-                self._report(
-                    f"Running candidates for {ticket.id} ({index} of {len(ordered_tickets)})",
-                    run,
-                )
-                results = self.execute_ticket(run["run_id"], ticket, start)
-                entry = {
-                    "ticket": ticket.id,
-                    "candidates": [r.model_dump(mode="json") for r in results],
-                }
-                run["tickets"].append(entry)
-                self.save_run(run)
-                self._report(f"Selecting the best candidate for {ticket.id}", run)
-                decision = self.select_candidate(ticket, results)
-                selected = next(
-                    (
-                        r
-                        for r in results
-                        if r.request.fork_number == decision.selected_fork
-                        and r.commit
-                        and r.validation.passed
-                    ),
-                    None,
-                )
-                if selected is None:
-                    raise RuntimeError("Reviewer selected an invalid candidate")
-                entry["decision"] = decision.model_dump()
-                self._report(f"Integrating {ticket.id} and running checks", run)
-                self.repository.git(
-                    *SWITCHYARD_GIT_CONFIG,
-                    "cherry-pick",
-                    selected.commit,
-                    cwd=workspace,
-                )
-                checks = list(dict.fromkeys(checks + ticket.validation_commands))
-                report = validate_candidate(
-                    self.repository,
-                    workspace,
-                    checks,
-                    timeout=self.settings.command_timeout_seconds,
-                )
-                entry["integration"] = report.model_dump()
-                if not report.passed:
-                    raise RuntimeError(f"Integration checks failed after {ticket.id}")
-                self._cleanup_execution_worktrees(run, results)
-                self.save_run(run)
-                self._report(f"Integrated {ticket.id}", run)
+            positions = {ticket.id: index for index, ticket in enumerate(ordered_tickets, start=1)}
+            for dependency_batch in plan.dependency_batches():
+                for offset in range(0, len(dependency_batch), self.settings.max_parallel_tickets):
+                    ticket_batch = dependency_batch[
+                        offset : offset + self.settings.max_parallel_tickets
+                    ]
+                    for ticket in ticket_batch:
+                        if not ticket.validation_commands:
+                            raise RuntimeError(f"{ticket.id} needs explicit validation commands")
+                        self._report(
+                            f"Running candidates for {ticket.id} "
+                            f"({positions[ticket.id]} of {len(ordered_tickets)})",
+                            run,
+                        )
+                    start = self.repository.git("rev-parse", "HEAD", cwd=workspace).stdout.strip()
+                    prepared = self._execute_ticket_batch(run, ticket_batch, start)
+                    for ticket, results, decision in prepared:
+                        entry = next(item for item in run["tickets"] if item["ticket"] == ticket.id)
+                        selected = next(
+                            (
+                                r
+                                for r in results
+                                if r.request.fork_number == decision.selected_fork
+                                and r.commit
+                                and r.validation.passed
+                            ),
+                            None,
+                        )
+                        if selected is None:
+                            raise RuntimeError("Reviewer selected an invalid candidate")
+                        self._report(f"Integrating {ticket.id} and running checks", run)
+                        self.repository.git(
+                            *SWITCHYARD_GIT_CONFIG,
+                            "cherry-pick",
+                            selected.commit,
+                            cwd=workspace,
+                        )
+                        checks = list(dict.fromkeys(checks + ticket.validation_commands))
+                        report = validate_candidate(
+                            self.repository,
+                            workspace,
+                            checks,
+                            timeout=self.settings.command_timeout_seconds,
+                        )
+                        entry["integration"] = report.model_dump()
+                        if not report.passed:
+                            raise RuntimeError(f"Integration checks failed after {ticket.id}")
+                        entry["status"] = "integrated"
+                        self._cleanup_execution_worktrees(run, results)
+                        self.save_run(run)
+                        self._report(f"Integrated {ticket.id}", run)
             self._report("Reviewing the integrated changes", run)
             review = self.review(request, plan, workspace, run["base"])
             run["review"] = review.model_dump(mode="json")

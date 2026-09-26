@@ -1,51 +1,64 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
-from typing import Literal
 
 from pydantic import Field, model_validator
 
 from .models import StrictModel
 from .paths import data_dir
 
-StepKind = Literal["plan", "execute", "validate", "select", "merge", "review"]
-REQUIRED_KINDS: tuple[StepKind, ...] = ("plan", "execute", "validate", "select", "merge", "review")
+DEFAULT_KINDS = ("plan", "execute", "validate", "select", "merge", "review")
+# Keep the advanced passes available as reusable templates, but do not spend quota on
+# them in every newly created default workflow.
+DEFAULT_WORKFLOW_KINDS = ("plan", "execute", "validate", "review")
 
 DEFAULT_PROMPTS = {
     "plan": "Act as the engineering lead. Produce small dependency-aware tickets with objective acceptance criteria and repository-native validation commands.",
     "execute": "Implement the ticket completely. Keep changes scoped, preserve compatibility, run relevant checks, and report assumptions and risks.",
-    "validate": "Run the ticket's deterministic checks and reject candidates with failing commands.",
-    "select": "Choose the strongest candidate by correctness, acceptance coverage, maintainability, and integration risk.",
-    "merge": "Integrate the selected commit dependency-first, then rerun all accumulated validation commands.",
+    "validate": "Inspect the current implementation, run the relevant checks, diagnose failures, and fix issues you find.",
+    "select": "Evaluate the current implementation against the request and improve it where another approach would be stronger.",
+    "merge": "Make the current implementation cohesive and complete, resolving inconsistencies and integration problems.",
     "review": "Review the integrated result for correctness, missing requirements, regressions, security, and test coverage.",
 }
 
 
 class WorkflowStep(StrictModel):
     id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
-    kind: StepKind
+    kind: str = Field(min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=80)
     engine: str = Field(min_length=1)
+    configuration: str = Field(default="default", min_length=1, max_length=80)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    effort: str | None = Field(default=None, min_length=1, max_length=40)
     system_prompt: str = Field(min_length=1, max_length=12000)
 
     @property
-    def is_deterministic(self) -> bool:
-        return self.kind in {"validate", "merge"}
-
-    @property
     def combo(self) -> str | None:
+        if self.engine == "opencode" and self.configuration == "9router":
+            return None if self.model in {None, "auto"} else self.model
         if self.engine == "9router/auto":
             return None
         return self.engine.removeprefix("9router/") if self.engine.startswith("9router/") else None
 
+    @property
+    def rotates_combos(self) -> bool:
+        return self.engine == "9router/auto" or (
+            self.engine == "opencode"
+            and self.configuration == "9router"
+            and self.model in {None, "auto"}
+        )
+
     @model_validator(mode="after")
     def validate_engine(self):
-        if self.is_deterministic and self.engine != "deterministic":
-            raise ValueError(f"{self.name} must use the deterministic engine")
-        if not self.is_deterministic and not (
-            self.engine == "codex" or self.engine == "9router/auto" or self.combo
-        ):
+        supported = (
+            self.engine in {"codex", "opencode"}
+            or self.engine.startswith("tool/")
+            or self.engine == "9router/auto"
+            or self.combo
+        )
+        if not supported:
             raise ValueError(f"Unsupported engine for {self.name}: {self.engine}")
         return self
 
@@ -56,27 +69,9 @@ class WorkflowRecipe(StrictModel):
     steps: list[WorkflowStep]
 
     def require_executable(self, *, plan_only: bool = False) -> None:
-        """Require the phases consumed by the dependency-aware engineering runner."""
-        kinds = [step.kind for step in self.steps]
-        if plan_only:
-            if kinds.count("plan") != 1:
-                raise ValueError("Planning requires exactly one plan step in the workflow")
-            return
+        """Retained for API compatibility; workflows have no required shape."""
 
-        missing = [kind for kind in REQUIRED_KINDS if kind not in kinds]
-        duplicates = [kind for kind in REQUIRED_KINDS if kinds.count(kind) > 1]
-        if missing or duplicates:
-            problems = []
-            if missing:
-                problems.append(f"Add: {', '.join(missing)}")
-            if duplicates:
-                problems.append(f"remove repeated: {', '.join(duplicates)}")
-            raise ValueError(
-                "Full dispatch needs exactly one step of each type. "
-                f"{'; '.join(problems)}."
-            )
-
-    def step(self, kind: StepKind) -> WorkflowStep:
+    def step(self, kind: str) -> WorkflowStep:
         return next(step for step in self.steps if step.kind == kind)
 
 
@@ -84,6 +79,9 @@ class WorkflowStepBinding(StrictModel):
     step_id: str
     name: str | None = Field(default=None, min_length=1, max_length=80)
     engine: str | None = Field(default=None, min_length=1)
+    configuration: str | None = Field(default=None, min_length=1, max_length=80)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    effort: str | None = Field(default=None, min_length=1, max_length=40)
     system_prompt: str | None = Field(default=None, min_length=1, max_length=12000)
 
 
@@ -134,6 +132,9 @@ class WorkflowConfiguration(StrictModel):
                     kind=template.kind,
                     name=binding.name or template.name,
                     engine=binding.engine or template.engine,
+                    configuration=binding.configuration or template.configuration,
+                    model=binding.model if binding.model is not None else template.model,
+                    effort=binding.effort if binding.effort is not None else template.effort,
                     system_prompt=binding.system_prompt or template.system_prompt,
                 )
             )
@@ -156,18 +157,18 @@ class WorkflowCollection(StrictModel):
 def default_configuration() -> WorkflowConfiguration:
     labels = {
         "plan": "Plan and decompose",
-        "execute": "Build three candidates",
-        "validate": "Validate candidates",
-        "select": "Select candidate",
-        "merge": "Merge and integrate",
+        "execute": "Implement changes",
+        "validate": "Validate changes",
+        "select": "Evaluate implementation",
+        "merge": "Integrate changes",
         "review": "Final review",
     }
     engines = {
         "plan": "codex",
         "execute": "9router/auto",
-        "validate": "deterministic",
+        "validate": "codex",
         "select": "codex",
-        "merge": "deterministic",
+        "merge": "codex",
         "review": "codex",
     }
     steps = [
@@ -178,7 +179,7 @@ def default_configuration() -> WorkflowConfiguration:
             engine=engines[kind],
             system_prompt=DEFAULT_PROMPTS[kind],
         )
-        for kind in REQUIRED_KINDS
+        for kind in DEFAULT_KINDS
     ]
     return WorkflowConfiguration(
         steps=steps,
@@ -187,7 +188,7 @@ def default_configuration() -> WorkflowConfiguration:
                 id="default",
                 name="Default engineering route",
                 isolated_worktree=True,
-                steps=[WorkflowStepBinding(step_id=step.id) for step in steps],
+                steps=[WorkflowStepBinding(step_id=f"default-{kind}") for kind in DEFAULT_WORKFLOW_KINDS],
             )
         ],
         default_workflow_id="default",
@@ -224,10 +225,20 @@ class WorkflowStore:
         if not self.path.exists():
             return default_configuration()
         text = self.path.read_text(encoding="utf-8")
+        payload = json.loads(text)
+        # Older releases reserved validation and merge for an internal deterministic
+        # engine. Migrate those saved routes to an agent-backed tool when loading.
+        for step in payload.get("steps", []):
+            if step.get("engine") == "deterministic":
+                step["engine"] = "codex"
+        for workflow in payload.get("workflows", []):
+            for binding in workflow.get("steps", []):
+                if binding.get("engine") == "deterministic":
+                    binding["engine"] = "codex"
         try:
-            return WorkflowConfiguration.model_validate_json(text)
+            return WorkflowConfiguration.model_validate(payload)
         except ValueError:
-            return configuration_from_recipe(WorkflowRecipe.model_validate_json(text))
+            return configuration_from_recipe(WorkflowRecipe.model_validate(payload))
 
     def get_config(self) -> WorkflowConfiguration:
         with self.lock:

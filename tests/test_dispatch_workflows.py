@@ -9,7 +9,6 @@ def test_dispatch_uses_shared_library_when_switching_workspaces():
     controls = (assets / "theme-controls.js").read_text(encoding="utf-8")
     functions = "\n".join([
         app[app.index("function renderWorkflowSelector()"):app.index("function renderWorkflowEditor()")],
-        app[app.index("function routeIsDispatchable("):app.index("function editWorkflow(")],
         app[app.index("function updateDispatchWorkflowLabel()"):app.index("async function loadWorkflowConfiguration()")],
         workspaces[workspaces.index("  function setDispatchWorkflow("):workspaces.index("  function renderList()")],
         controls[controls.index("  function syncSelect("):controls.index("  function renderSelectOptions(")],

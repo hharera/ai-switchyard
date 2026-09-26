@@ -12,6 +12,20 @@ from ninerouter_orchestrator.workflow_config import WorkflowStore
 client = TestClient(app, headers={"x-switchyard-client": "local-ui"})
 
 
+def test_main_opens_the_default_browser(monkeypatch):
+    opened = []
+    started = []
+    monkeypatch.setattr(web.webbrowser, "open_new_tab", opened.append)
+    monkeypatch.setattr(web.uvicorn, "run", lambda *args, **kwargs: started.append((args, kwargs)))
+
+    web.main()
+
+    assert opened == ["http://127.0.0.1:8765"]
+    assert started == [
+        (("ninerouter_orchestrator.web:app",), {"host": "127.0.0.1", "port": 8765})
+    ]
+
+
 def test_folder_picker_selects_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "_folder_picker_command", lambda: ["picker", "--directory"])
     monkeypatch.setattr(
@@ -192,8 +206,10 @@ def test_template_catalog_is_not_a_workflow_sequence():
     assert 'class="template-fields"' in script
     assert 'class="template-footer"' in script
     assert 'id="template-count"' in page
-    assert ">Step type</label>" in script
-    assert "Determines compatible workflow phases, not a template order." in script
+    assert ">Step category</label>" in script
+    assert "Categories do not control execution or order." in script
+    assert "Code safety gate" not in script
+    assert "Deterministic code" not in script
     assert 'title: "Remove template?"' in script
     assert "Replace those references and save the workflows" in script
     assert 'class="workflow-step"' not in script
@@ -326,6 +342,74 @@ def test_dispatch_is_queued_while_another_dispatch_is_active(monkeypatch, tmp_pa
     assert response.json()["status"] == "queued"
 
 
+def test_completed_dispatch_can_create_linked_followup(monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "store", JobStore(tmp_path / "jobs.json"))
+    monkeypatch.setattr(web, "_work", lambda *args, **kwargs: None)
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    result = subprocess.run(
+        ["git", "init", "--initial-branch", "main"], cwd=repository,
+        check=True, capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit",
+         "--allow-empty", "-m", "baseline"],
+        cwd=repository, check=True, capture_output=True, text=True,
+    )
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
+    workflow = web.default_recipe().model_dump()
+    parent = web.store.create(
+        repository=str(repository), request="Build the account settings screen", workflow=workflow,
+    )
+    web.store.update(
+        parent["id"], status="completed", result={
+            "status": "completed", "base": commit, "commit": commit,
+            "steps": [{"name": "Implement", "output": "Added the settings screen."}],
+        }, mcp_config={}, cli_config={}, delivery={"mode": "pr"}, run_settings={},
+    )
+
+    response = client.post(f"/api/jobs/{parent['id']}/followups", json={
+        "message": "Also cover the empty state with tests",
+        "allow_host_execution": True,
+    })
+
+    assert response.status_code == 202
+    followup = response.json()
+    assert followup["followup_of"] == parent["id"]
+    assert followup["followup_root"] == parent["id"]
+    assert followup["followup_base"] == commit
+    assert followup["delivery"]["mode"] == "none"
+    assert "Build the account settings screen" in followup["execution_request"]
+    assert "Also cover the empty state with tests" in followup["execution_request"]
+    assert followup["original_request"] == parent["request"]
+
+    for invalid in (
+        {"message": "          ", "allow_host_execution": True},
+        {"message": "Make another small change", "allow_host_execution": False},
+    ):
+        rejected = client.post(f"/api/jobs/{parent['id']}/followups", json=invalid)
+        assert rejected.status_code == 422
+    assert len(web.store.list()) == 2
+
+
+def test_followup_rejects_active_or_failed_dispatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "store", JobStore(tmp_path / "jobs.json"))
+    workflow = web.default_recipe().model_dump()
+    active = web.store.create(repository=str(tmp_path), request="Active dispatch", workflow=workflow)
+    response = client.post(f"/api/jobs/{active['id']}/followups", json={
+        "message": "Continue this active dispatch", "allow_host_execution": True,
+    })
+    assert response.status_code == 409
+
+    web.store.update(active["id"], status="failed", result={"status": "failed"})
+    response = client.post(f"/api/jobs/{active['id']}/followups", json={
+        "message": "Continue this failed dispatch", "allow_host_execution": True,
+    })
+    assert response.status_code == 422
+    assert "preserved worktree" in response.json()["detail"]
+
+
 @pytest.mark.parametrize("fail_first", [False, True])
 def test_queued_dispatch_runs_after_active_dispatch_finishes(monkeypatch, tmp_path, fail_first):
     monkeypatch.setattr(web, "workflow_store", WorkflowStore(tmp_path / "workflow.json"))
@@ -455,19 +539,19 @@ def test_dispatch_controls_and_schema_have_no_mode():
     assert "default_mode" not in schema["Workspace"]["properties"]
 
 
-def test_dispatch_rejects_plan_only_workflow(monkeypatch, tmp_path):
+def test_dispatch_accepts_single_step_workflow(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "workflow_store", WorkflowStore(tmp_path / "workflow.json"))
     monkeypatch.setattr(web, "store", JobStore(tmp_path / "jobs.json"))
     config = web.workflow_store.get_config()
     config.workflows[0].steps = config.workflows[0].steps[:1]
     web.workflow_store.save_config(config)
+    monkeypatch.setattr(web, "_work", lambda *args: None)
     response = client.post("/api/jobs", json={
         "repository": str(tmp_path), "request": "Implement a trusted change",
         "allow_host_execution": True,
     })
-    assert response.status_code == 422
-    assert "Add: execute, validate, select, merge, review" in response.json()["detail"]
-    assert web.store.list() == []
+    assert response.status_code == 202
+    assert len(response.json()["workflow"]["steps"]) == 1
 
 
 def test_workflow_can_be_saved(monkeypatch, tmp_path):

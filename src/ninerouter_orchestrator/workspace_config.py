@@ -14,7 +14,8 @@ class Workspace(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     repository: str = Field(min_length=1, max_length=4096)
     workflow_id: str | None = Field(default="default", max_length=80)
-    forks_per_ticket: int = Field(default=3, ge=1, le=5)
+    forks_per_ticket: int = Field(default=1, ge=1, le=5)
+    max_parallel_tickets: int = Field(default=1, ge=1, le=8)
     command_timeout_seconds: int = Field(default=1800, ge=30, le=7200)
     git_base_branch: str = Field(default="main", min_length=1, max_length=240)
     delivery: DeliveryConfig = Field(default_factory=DeliveryConfig)
@@ -38,6 +39,7 @@ class Workspace(BaseModel):
     def run_settings(self) -> dict:
         return {
             "forks_per_ticket": self.forks_per_ticket,
+            "max_parallel_tickets": self.max_parallel_tickets,
             "command_timeout_seconds": self.command_timeout_seconds,
         }
 

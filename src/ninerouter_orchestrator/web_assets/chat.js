@@ -78,7 +78,10 @@
   function renderMessages() {
     if (selectedHistory) return;
     const {messages} = conversation();
+    const scrollTop = list.scrollTop;
+    const following = list.scrollHeight - scrollTop - list.clientHeight < 80;
     displayMessages(messages);
+    if (pending && !following) list.scrollTop = scrollTop;
   }
 
   function displayMessages(messages) {
@@ -89,7 +92,44 @@
       meta.textContent = `${message.role === "user" ? "You" : message.label || "Assistant"}${message.timestamp ? ` / ${formatDate(message.timestamp)}` : ""}`;
       const content = document.createElement("div");
       const structured = message.role === "assistant" ? renderStructuredJson(message.content) : "";
-      if (structured) {
+      if (message.role === "assistant" && (message.streaming || message.activity?.length)) {
+        content.className = "chat-message-body";
+        const progress = document.createElement("details");
+        progress.className = "chat-progress";
+        progress.open = message.stepsOpen ?? Boolean(message.streaming);
+        progress.addEventListener("toggle", () => { message.stepsOpen = progress.open; });
+        const heading = document.createElement("summary");
+        const pulse = document.createElement("span");
+        pulse.className = "chat-progress-pulse";
+        pulse.setAttribute("aria-hidden", "true");
+        const headingText = document.createElement("span");
+        headingText.textContent = "Thinking & steps";
+        heading.append(pulse, headingText);
+        const steps = document.createElement("ol");
+        const activity = message.activity?.length ? message.activity : [{
+          kind: "status", label: "Starting", detail: `${message.label || "Assistant"} is reading the workspace.`
+        }];
+        steps.replaceChildren(...activity.map((entry) => {
+          const step = document.createElement("li");
+          step.dataset.kind = entry.kind;
+          const label = document.createElement("strong");
+          label.textContent = entry.label;
+          const detail = document.createElement("span");
+          detail.textContent = entry.detail;
+          step.append(label, detail);
+          return step;
+        }));
+        progress.append(heading, steps);
+        const answer = document.createElement("div");
+        answer.className = `chat-answer${message.streaming && !message.content ? " pending" : ""}`;
+        if (structured) {
+          answer.className += " structured-message";
+          answer.innerHTML = structured;
+        } else {
+          answer.textContent = message.content || "Preparing a response...";
+        }
+        content.append(progress, answer);
+      } else if (structured) {
         content.className = "structured-message";
         content.innerHTML = structured;
       } else {
@@ -274,40 +314,76 @@
     const userMessage = {role: "user", content: content.trim()};
     messages.push(userMessage);
     renderMessages();
+    // Keep complete recent exchanges inside the backend's transcript budget.
+    const transcript = messages.slice(-19)
+      .map(({role, content: text}) => ({role, content: text.slice(0, 24000)}));
+    while (transcript.length > 1 && new TextEncoder().encode(JSON.stringify(transcript)).length > 95000) transcript.splice(0, 2);
     input.value = "";
     state.draft = "";
     pending = true;
     state.error = "";
-    state.status = `${label} is reading the workspace. Replies may take up to three minutes.`;
+    const assistantMessage = {
+      role: "assistant", content: "", tool: selectedTool, label, activity: [], streaming: true
+    };
+    messages.push(assistantMessage);
+    renderMessages();
+    state.status = `${label} is streaming its work.`;
     updateWorkspace();
     send.disabled = true;
     input.disabled = true;
     select.disabled = true;
     newChat.disabled = true;
     refresh.disabled = true;
-    send.querySelector("span").textContent = "Waiting for reply";
-    send.title = "Waiting for reply";
+    send.querySelector("span").textContent = "Receiving reply";
+    send.title = "Receiving reply";
     try {
-      // Keep complete recent exchanges inside the backend's transcript budget.
-      const transcript = messages.slice(-19).map(({role, content: text}) => ({role, content: text.slice(0, 24000)}));
-      while (transcript.length > 1 && new TextEncoder().encode(JSON.stringify(transcript)).length > 95000) transcript.splice(0, 2);
-      const response = await fetch("/api/chat", {
+      const response = await fetch("/api/chat/stream", {
         method: "POST",
         headers: {"Content-Type": "application/json", "X-Switchyard-Client": "local-ui"},
         body: JSON.stringify({
           tool: selectedTool, workspace_id: workspace.id, messages: transcript, session_id: state.sessionId
         })
       });
-      const body = await response.json();
       if (!response.ok) {
+        const body = await response.json();
         const detail = Array.isArray(body.detail) ? body.detail.map(item => item.msg).join("; ") : body.detail;
         throw new Error(detail || "Unable to get a reply. Try again.");
       }
-      messages.push({role: "assistant", content: body.message, tool: body.tool, label});
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffered = "";
+      let completed = false;
+      while (true) {
+        const {value, done} = await reader.read();
+        buffered += decoder.decode(value || new Uint8Array(), {stream: !done});
+        const lines = buffered.split("\n");
+        buffered = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (event.type === "thinking") {
+            assistantMessage.activity.push({kind: "thinking", label: "Thinking", detail: event.content});
+          } else if (event.type === "step") {
+            assistantMessage.activity.push({kind: "step", label: event.label, detail: event.detail});
+          } else if (event.type === "delta") {
+            assistantMessage.content += `${assistantMessage.content ? "\n" : ""}${event.content}`;
+          } else if (event.type === "done") {
+            assistantMessage.content = event.message;
+            assistantMessage.streaming = false;
+            state.error = event.warning || "";
+            completed = true;
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+          if (state === conversation()) renderMessages();
+        }
+        if (done) break;
+      }
+      if (!completed) throw new Error("The reply stream ended before completion. Try again.");
       state.status = `Reply received from ${label}.`;
-      state.error = body.warning || "";
       if (workspace.repository === activeWorkspace()?.repository) loadHistory();
     } catch (failure) {
+      messages.pop();
       messages.pop();
       state.draft = userMessage.content;
       state.error = failure.message;

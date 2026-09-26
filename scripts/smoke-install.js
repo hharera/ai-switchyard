@@ -24,19 +24,23 @@ try {
   if (!npm) throw new Error("Run this check with npm run test:install.");
   const packed = JSON.parse(run(process.execPath, [npm, "pack", "--json", "--pack-destination", temporary]));
   const tarball = join(temporary, packed[0].filename);
-  run(process.execPath, [npm, "install", "--global", "--prefix", destination, tarball]);
-  const executable = process.platform === "win32"
-    ? join(destination, "switchyard.cmd")
-    : join(destination, "bin", "switchyard");
-  if (!existsSync(executable)) throw new Error("npm did not create the platform command shim");
-  const invoke = (args) => process.platform === "win32"
-    ? run(`"${executable}" ${args.join(" ")}`, [], {cwd: temporary, shell: true})
-    : run(executable, args, {cwd: temporary});
-  const help = invoke(["--help"]);
+  run(process.execPath, [npm, "install", "--global", "--allow-scripts=openswitch", "--prefix", destination, tarball]);
+  const executable = (name) => process.platform === "win32"
+    ? join(destination, `${name}.cmd`)
+    : join(destination, "bin", name);
+  for (const name of ["openswitch", "switchyard"]) {
+    if (!existsSync(executable(name))) throw new Error(`npm did not create the ${name} command shim`);
+  }
+  const invoke = (name, args) => process.platform === "win32"
+    ? run(`"${executable(name)}" ${args.join(" ")}`, [], {cwd: temporary, shell: true})
+    : run(executable(name), args, {cwd: temporary});
+  const help = invoke("openswitch", ["--help"]);
   if (!help.includes("Usage") || !help.includes("Switchyard")) throw new Error("Installed CLI help is incomplete");
-  const version = invoke(["--version"]).trim();
-  if (version !== packed[0].version) throw new Error(`Installed CLI version ${version} does not match ${packed[0].version}`);
-  const catalog = JSON.parse(invoke(["mcp", "catalog", "--search", "memory"]));
+  for (const name of ["openswitch", "switchyard"]) {
+    const version = invoke(name, ["--version"]).trim();
+    if (version !== packed[0].version) throw new Error(`Installed ${name} version ${version} does not match ${packed[0].version}`);
+  }
+  const catalog = JSON.parse(invoke("openswitch", ["mcp", "catalog", "--search", "memory"]));
   if (!catalog.length || !catalog.every(item => item.name.toLowerCase().includes("memory"))) {
     throw new Error("Installed shared MCP catalog command did not return filtered results");
   }

@@ -15,24 +15,25 @@ from ninerouter_orchestrator.workflow_config import (
 )
 
 
-def test_default_recipe_has_required_pipeline():
+def test_default_recipe_avoids_optional_agent_passes():
     recipe = default_recipe()
     assert recipe.isolated_worktree is True
     assert [step.kind for step in recipe.steps] == [
         "plan",
         "execute",
         "validate",
-        "select",
-        "merge",
         "review",
     ]
     assert recipe.step("execute").engine == "9router/auto"
 
 
-def test_deterministic_steps_cannot_use_models():
+def test_all_steps_use_ai_tools_regardless_of_category():
     payload = default_recipe().model_dump()
     payload["steps"][2]["engine"] = "codex"
-    with pytest.raises(ValueError, match="deterministic"):
+    payload["steps"][2]["kind"] = "custom verification"
+    assert WorkflowRecipe.model_validate(payload).steps[2].kind == "custom verification"
+    payload["steps"][2]["engine"] = "deterministic"
+    with pytest.raises(ValueError, match="Unsupported engine"):
         WorkflowRecipe.model_validate(payload)
 
 
@@ -133,14 +134,27 @@ def test_empty_partial_and_reordered_workflows_round_trip(tmp_path):
     assert reloaded.resolve("empty").steps == []
     reloaded.resolve("partial").require_executable(plan_only=True)
     reloaded.resolve().require_executable()
-    with pytest.raises(ValueError, match="Add: execute, validate, select, merge, review"):
-        reloaded.resolve("partial").require_executable()
-    with pytest.raises(ValueError, match="exactly one plan"):
-        reloaded.resolve("empty").require_executable(plan_only=True)
+    reloaded.resolve("partial").require_executable()
+    reloaded.resolve("empty").require_executable(plan_only=True)
 
 
-def test_full_dispatch_rejects_repeated_phase():
+def test_full_dispatch_allows_repeated_category():
     recipe = default_recipe()
     recipe.steps.append(recipe.step("review").model_copy(update={"id": "second-review"}))
-    with pytest.raises(ValueError, match="remove repeated: review"):
-        recipe.require_executable()
+    recipe.require_executable()
+
+
+def test_legacy_deterministic_templates_and_overrides_migrate_without_rewriting(tmp_path):
+    import json
+
+    store = WorkflowStore(tmp_path / "workflow.json")
+    payload = store.get_config().model_dump()
+    payload["steps"][2]["engine"] = "deterministic"
+    payload["workflows"][0]["steps"][-1]["engine"] = "deterministic"
+    original = json.dumps(payload)
+    store.path.write_text(original)
+    migrated = store.get_config()
+    assert migrated.steps[2].engine == "codex"
+    assert migrated.resolve().steps[-1].engine == "codex"
+    assert store.path.read_text() == original
+    assert migrated.steps[2].system_prompt == payload["steps"][2]["system_prompt"]

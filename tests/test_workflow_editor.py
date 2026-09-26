@@ -30,7 +30,7 @@ const escapeHtml = value => String(value ?? "");
 const engineOptions = () => '<option value="codex">Codex subscription</option>';
 const renderSteps = () => {};
 const kinds = ["plan", "execute", "validate", "select", "merge", "review"];
-const templates = kinds.map(kind => ({id: kind, kind, name: kind, engine: ["validate", "merge"].includes(kind) ? "deterministic" : "codex", system_prompt: "instructions"}));
+const templates = kinds.map(kind => ({id: kind, kind, name: kind, engine: "codex", system_prompt: "instructions"}));
 const saved = {default_workflow_id: "default", steps: templates, workflows: [{
   id: "default", name: "Saved workflow", steps: kinds.map(step_id => ({step_id, name: null, engine: null, system_prompt: null})),
 }]};
@@ -69,7 +69,8 @@ const fetch = async (url, options = {}) => {
 
   moveWorkflowStep(0, 2);
   assert.deepEqual(currentWorkflow().steps.slice(0, 2).map(item => item.step_id), ["execute", "plan"]);
-  assert.match(element("#workflow-editor").innerHTML, /Ready for full dispatch\. The runner resolves phase dependencies/);
+  assert.match(element("#workflow-editor").innerHTML, /Steps run through their selected AI tool in this order/);
+  assert.doesNotMatch(element("#workflow-editor").innerHTML, /draft route|Full dispatch requires/);
   moveWorkflowStep(1, 0);
   assert.deepEqual(currentWorkflow().steps.map(item => item.step_id), kinds);
 

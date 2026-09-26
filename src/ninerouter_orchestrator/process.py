@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -110,3 +113,66 @@ def run_process(
 
 def run_shell(command: str, *, cwd: Path, timeout: int) -> CommandResult:
     return run_process(shell_argv(command), cwd=cwd, timeout=timeout)
+
+
+def stream_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    env: Mapping[str, str] | None,
+    on_line,
+) -> None:
+    """Drain line-oriented output as it arrives, including across idle periods."""
+    process_env = {**os.environ, "PATH": tool_path(), **(env or {})}
+    started = time.monotonic()
+    lines: queue.Queue[str] = queue.Queue(maxsize=128)
+    stopped = threading.Event()
+    with tempfile.TemporaryFile(mode="w+b") as errors:
+        try:
+            process = subprocess.Popen(
+                windows_command(command, process_env) if os.name == "nt" else list(command),
+                cwd=cwd,
+                env=process_env,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise ProcessError(f"Cannot start {command[0]}. Check its installation and PATH") from exc
+
+        def read_stdout() -> None:
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    while not stopped.is_set():
+                        try:
+                            lines.put(line, timeout=0.1)
+                            break
+                        except queue.Full:
+                            pass
+                    if stopped.is_set():
+                        break
+            finally:
+                process.stdout.close()
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+        try:
+            while reader.is_alive() or not lines.empty() or process.poll() is None:
+                if time.monotonic() - started > timeout:
+                    raise ProcessError(f"Command timed out after {timeout}s")
+                try:
+                    on_line(lines.get(timeout=0.1))
+                except queue.Empty:
+                    pass
+            if process.wait() != 0:
+                raise ProcessError("Command failed")
+        finally:
+            stopped.set()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            reader.join(timeout=1)

@@ -5,6 +5,12 @@ const runDrawer = document.querySelector("#run-drawer");
 const runDrawerClose = document.querySelector("#run-drawer-close");
 const runStreamStatus = document.querySelector("#run-stream-status");
 let selectedJobId = null;
+const followupDrafts = new Map();
+let followupSending = false;
+const followupForm = document.querySelector("#run-followup-form");
+const followupMessage = document.querySelector("#run-followup-message");
+const followupConfirmation = document.querySelector("#run-followup-allow-host");
+const followupError = document.querySelector("#run-followup-error");
 let runEventSource = null;
 let streamedJobId = null;
 let jobs = [];
@@ -189,7 +195,14 @@ function showJob(id, focus = true) {
   const job = jobs.find((item) => item.id === id);
   if (!job) return;
   const sameJob = selectedJobId === id;
+  if (!sameJob) {
+    if (selectedJobId) followupDrafts.set(selectedJobId, followupMessage.value);
+    followupMessage.value = followupDrafts.get(id) || "";
+    followupConfirmation.checked = false;
+    followupError.textContent = "";
+  }
   selectedJobId = id;
+  updateFollowupComposer(job);
   const detail = document.querySelector("#run-detail");
   const fingerprint = JSON.stringify(job);
   if (!sameJob || detail.dataset.snapshot !== fingerprint) {
@@ -201,7 +214,9 @@ function showJob(id, focus = true) {
     detail.innerHTML = renderRunDetails(job);
     detail.dataset.snapshot = fingerprint;
     detail.querySelectorAll("details").forEach(item => {
-      item.open = expanded.has(item.dataset.detailKey);
+      item.open = sameJob
+        ? expanded.has(item.dataset.detailKey)
+        : item.hasAttribute("data-default-open");
       if (item.dataset.detailKey === focusedKey) item.querySelector("summary").focus({preventScroll: true});
     });
     runDrawer.scrollTop = sameJob ? scrollTop : 0;
@@ -219,6 +234,77 @@ function showJob(id, focus = true) {
   startRunStream(job);
   if (focus) runDrawerClose.focus();
 }
+
+function updateFollowupComposer(job) {
+  const result = job.result || {};
+  const isolated = (job.workflow || result.workflow || {}).isolated_worktree !== false;
+  const blocked = runIsActive(job) ? "Wait for this run to finish before sending a follow-up."
+    : !["completed", "approved", "delivery_failed"].includes(job.status)
+      ? "This run did not finish with a reusable baseline. Recover its preserved worktree first."
+    : isolated && !result.commit && !result.base && !result.no_op
+      ? "This run has no completed commit to continue. Recover its preserved worktree first." : "";
+  document.querySelector("#run-followup-note").textContent = blocked ||
+    `Starts a linked run with the saved workflow and previous context. ${isolated ? "Continues from this run's commit in a new worktree." : "Uses the current workspace checkout, which must be clean."} Changes stay local; nothing is pushed.`;
+  followupForm.hidden = Boolean(blocked);
+  followupForm.querySelector("button[type=submit]").disabled = followupSending;
+  document.querySelector("#run-followup-status").textContent = followupSending ? "Queuing follow-up..." : "";
+}
+
+followupForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (followupSending) return;
+  const parentId = selectedJobId;
+  const message = followupMessage.value.trim();
+  followupError.textContent = "";
+  if (message.length < 10) {
+    followupError.textContent = "Describe the follow-up in at least 10 characters.";
+    followupMessage.setAttribute("aria-invalid", "true");
+    followupMessage.focus();
+    return;
+  }
+  followupMessage.removeAttribute("aria-invalid");
+  followupSending = true;
+  updateFollowupComposer(jobs.find(job => job.id === parentId));
+  try {
+    const response = await fetch(`/api/jobs/${encodeURIComponent(parentId)}/followups`, {
+      method: "POST", headers: {"Content-Type": "application/json", "X-Switchyard-Client": "local-ui"},
+      body: JSON.stringify({message, allow_host_execution: followupConfirmation.checked})
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(Array.isArray(body.detail) ? body.detail.map(item => item.msg).join("; ") : body.detail || "Unable to send follow-up. Try again.");
+    followupDrafts.delete(parentId);
+    if (selectedJobId === parentId) followupMessage.value = "";
+    jobs.unshift(body);
+    renderJobs();
+    if (selectedJobId === parentId && runDrawer.classList.contains("open")) showJob(body.id);
+  } catch (error) {
+    followupError.textContent = error.message;
+  } finally {
+    followupSending = false;
+    followupConfirmation.checked = false;
+    const selected = jobs.find(job => job.id === selectedJobId);
+    if (selected) updateFollowupComposer(selected);
+  }
+});
+
+document.querySelector("#run-detail").addEventListener("click", async event => {
+  const related = event.target.closest("[data-related-job]");
+  if (!related) return;
+  const fromId = selectedJobId;
+  try {
+    const id = related.dataset.relatedJob;
+    if (!jobs.some(job => job.id === id)) {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
+      if (!response.ok) throw new Error("Unable to load the previous run. Try again.");
+      const job = await response.json();
+      if (selectedJobId !== fromId || !runDrawer.classList.contains("open")) return;
+      jobs.push(job);
+    }
+    showJob(id);
+  } catch (error) {
+    followupError.textContent = error.message;
+  }
+});
 
 function closeRunDrawer() {
   runDrawer.classList.remove("open");
@@ -276,9 +362,6 @@ setInterval(loadJobs, 3000);
 setInterval(loadHealth, 15000);
 
 function engineOptions(step) {
-  if (["validate", "merge"].includes(step.kind)) {
-    return '<option value="deterministic">Deterministic code</option>';
-  }
   const engines = [
     ["codex", "Codex subscription"],
     ["9router/auto", "9router / rotate defaults"],
@@ -291,12 +374,11 @@ function engineOptions(step) {
 function renderSteps() {
   document.querySelector("#template-count").textContent = `${stepCatalog.length} ${stepCatalog.length === 1 ? "template" : "templates"}`;
   document.querySelector("#step-catalog").innerHTML = stepCatalog.map((step, index) => {
-    const deterministic = ["validate", "merge"].includes(step.kind);
     const usage = savedWorkflowConfig?.workflows.filter(flow => flow.steps.some(binding => binding.step_id === step.id)).length || 0;
-    return `<li class="template-card" data-step="${index}" data-kind="${step.kind}">
+    return `<li class="template-card" data-step="${index}" data-kind="${escapeHtml(step.kind)}">
       <header class="template-heading">
         <div class="template-identity"><h3 data-template-title>${escapeHtml(step.name || "Untitled template")}</h3><span class="template-id">ID / <code>${escapeHtml(step.id)}</code></span></div>
-        <span class="template-mode ${deterministic ? "is-deterministic" : ""}">${deterministic ? "Code safety gate" : "AI agent"}</span>
+        <span class="template-mode">AI agent</span>
       </header>
       <p class="template-route"><span>${escapeHtml(step.kind)}</span><span aria-hidden="true">/</span><span data-template-route>${escapeHtml(templateRouteLabel(step))}</span></p>
       <div class="template-fields">
@@ -305,24 +387,24 @@ function renderSteps() {
         <input id="step-name-${index}" data-field="name" value="${escapeHtml(step.name)}" required maxlength="80">
       </div>
       <div class="step-field">
-        <label for="step-kind-${index}">Step type</label>
-        <select id="step-kind-${index}" data-field="kind" aria-describedby="step-kind-help-${index}">${["plan", "execute", "validate", "select", "merge", "review"].map(kind => `<option value="${kind}" ${kind === step.kind ? "selected" : ""}>${kind}</option>`).join("")}</select>
-        <span class="engine-note" id="step-kind-help-${index}">Determines compatible workflow phases, not a template order.</span>
+        <label for="step-kind-${index}">Step category</label>
+        <input id="step-kind-${index}" data-field="kind" value="${escapeHtml(step.kind)}" required maxlength="80" aria-describedby="step-kind-help-${index}">
+        <span class="engine-note" id="step-kind-help-${index}">Choose any label. Categories do not control execution or order.</span>
       </div>
       <div class="step-field">
-        <label for="step-engine-${index}">${deterministic ? "Execution" : "Default route"}</label>
-        <select id="step-engine-${index}" data-field="engine" aria-describedby="step-engine-help-${index}" ${deterministic ? "disabled" : ""}>${engineOptions(step)}</select>
-        <span class="engine-note" id="step-engine-help-${index}">${deterministic ? "Runs in code. No model is called." : "Codex uses its configured model; 9router routes run through OpenCode."}</span>
+        <label for="step-engine-${index}">Default tool / model</label>
+        <select id="step-engine-${index}" data-field="engine" aria-describedby="step-engine-help-${index}">${engineOptions(step)}</select>
+        <span class="engine-note" id="step-engine-help-${index}">Codex uses its configured model; 9router routes run through OpenCode.</span>
       </div>
       <div class="step-field template-wide template-prompt">
-        <div class="template-prompt-heading"><label for="step-prompt-${index}">${deterministic ? "Step contract" : "System prompt"}</label><span>${deterministic ? "Read-only" : "Editable instructions"}</span></div>
-        <textarea id="step-prompt-${index}" data-field="system_prompt" aria-describedby="step-prompt-help-${index}" required maxlength="12000" ${deterministic ? "readonly" : ""}>${escapeHtml(step.system_prompt)}</textarea>
-        <span class="engine-note" id="step-prompt-help-${index}">${deterministic ? "Describes the gate. Safety checks are controlled by the runner, not this text." : "Set the objective, constraints, and expected output. Workflows inherit this prompt unless overridden."}</span>
+        <div class="template-prompt-heading"><label for="step-prompt-${index}">System prompt</label><span>Editable instructions</span></div>
+        <textarea id="step-prompt-${index}" data-field="system_prompt" aria-describedby="step-prompt-help-${index}" required maxlength="12000">${escapeHtml(step.system_prompt)}</textarea>
+        <span class="engine-note" id="step-prompt-help-${index}">Set the objective, constraints, and expected output. Workflows inherit this prompt unless overridden.</span>
       </div>
       </div>
       <footer class="template-footer"><span>${usage ? `Used in ${usage} saved ${usage === 1 ? "workflow" : "workflows"}` : "Not used in a saved workflow"}</span><button class="secondary-button remove-template" type="button" data-remove-template="${index}" aria-label="Remove template: ${escapeHtml(step.name)}">Remove template</button></footer>
     </li>`;
-  }).join("") || '<li class="template-empty"><h3>No step templates</h3><p>Add a template to define a reusable agent or code safety gate.</p></li>';
+  }).join("") || '<li class="template-empty"><h3>No step templates</h3><p>Add a template to define a reusable AI agent step.</p></li>';
 }
 
 function readSteps() {
@@ -355,6 +437,7 @@ stepsForm.addEventListener("submit", async (event) => {
     if (!response.ok) throw new Error(Array.isArray(body.detail) ? body.detail.map((item) => item.msg).join("; ") : body.detail);
     stepCatalog = body.steps;
     workflowConfig.steps = structuredClone(stepCatalog);
+    savedWorkflowConfig.steps = structuredClone(stepCatalog);
     renderSteps(); renderWorkflowEditor();
     document.querySelector("#steps-save-status").textContent = "Templates saved. Workflows without overrides now inherit these defaults.";
   } catch (error) {
@@ -381,12 +464,8 @@ stepsForm.addEventListener("change", event => {
   if (!event.target.matches('[data-field="kind"]')) return;
   stepCatalog = readSteps();
   const index = Number(event.target.closest("[data-step]").dataset.step);
-  const step = stepCatalog[index];
-  if (["validate", "merge"].includes(step.kind)) step.engine = "deterministic";
-  else if (step.engine === "deterministic") step.engine = "codex";
   renderSteps();
-  // The shared control enhancer replaces native selects after the DOM update.
-  requestAnimationFrame(() => (document.querySelector(`#step-kind-${index}-control`) || document.querySelector(`#step-kind-${index}`))?.focus());
+  requestAnimationFrame(() => document.querySelector(`#step-kind-${index}`)?.focus());
 });
 stepsForm.addEventListener("click", async event => {
   const remove = event.target.closest("[data-remove-template]");
@@ -418,13 +497,10 @@ document.querySelector("#add-step-template").addEventListener("click", () => {
 
 function currentWorkflow() { return workflowConfig?.workflows.find(item => item.id === selectedWorkflowId); }
 function templateFor(id) { return workflowConfig.steps.find(step => step.id === id); }
-function phaseTemplates(kind) { return workflowConfig.steps.filter(step => step.kind === kind); }
-const workflowKinds = ["plan", "execute", "validate", "select", "merge", "review"];
 let draggedTemplateId = null;
 let draggedBindingIndex = null;
 
 function templateRouteLabel(step) {
-  if (step.engine === "deterministic") return "Deterministic";
   if (step.engine === "codex") return "Codex";
   if (step.engine === "9router/auto") return "9router / rotate";
   return step.engine.replace("9router/", "9router / ");
@@ -463,7 +539,7 @@ function renderDispatchWorkflowSelector(value = document.querySelector("#dispatc
   // Value assignments do not emit change events; refresh the enhanced control explicitly.
   dispatch.innerHTML = `<option value="">Without a workflow - built-in steps</option>`
     + (missing ? `<option value="${escapeHtml(value)}">${escapeHtml(value)} (unavailable)</option>` : "")
-    + workflows.map(flow => `<option value="${escapeHtml(flow.id)}">${escapeHtml(flow.name)}${flow.id === savedWorkflowConfig.default_workflow_id ? " (default)" : ""}${routeIsDispatchable(flow, savedWorkflowConfig) ? "" : " (draft route)"}</option>`).join("");
+    + workflows.map(flow => `<option value="${escapeHtml(flow.id)}">${escapeHtml(flow.name)}${flow.id === savedWorkflowConfig.default_workflow_id ? " (default)" : ""}</option>`).join("");
   dispatch.value = value || "";
   window.ThemeControls?.refreshSelect(dispatch);
   updateDispatchWorkflowLabel();
@@ -497,18 +573,18 @@ function renderWorkflowEditor() {
     <div class="workflow-compose">
       <aside class="template-library" aria-labelledby="template-library-title">
         <div class="template-library-heading"><span class="step-kind">Reusable building blocks</span><h3 id="template-library-title">Template library</h3><p>Drag templates into the route, or select a card to add it at the end.</p></div>
-        <div class="template-library-list">${workflowConfig.steps.map(step => `<button class="workflow-template-option" type="button" draggable="true" data-template-card="${escapeHtml(step.id)}" data-kind="${step.kind}" aria-label="Add ${escapeHtml(step.name)} to the workflow"><span class="drag-grip" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="template-option-copy"><b>${escapeHtml(step.name)}</b><small>${step.kind} / ${escapeHtml(templateRouteLabel(step))}</small></span></button>`).join("")}</div>
+        <div class="template-library-list">${workflowConfig.steps.map(step => `<button class="workflow-template-option" type="button" draggable="true" data-template-card="${escapeHtml(step.id)}" data-kind="${escapeHtml(step.kind)}" aria-label="Add ${escapeHtml(step.name)} to the workflow"><span class="drag-grip" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="template-option-copy"><b>${escapeHtml(step.name)}</b><small>${escapeHtml(step.kind)} / ${escapeHtml(templateRouteLabel(step))}</small></span></button>`).join("")}</div>
         <p id="workflow-dnd-status" class="field-note dnd-status" role="status"></p>
       </aside>
-      <div class="workflow-route"><div class="workflow-route-heading"><span class="step-kind">Execution route</span><h3>Workflow steps</h3><p>Add templates, then drag the step handles to arrange the route.</p><p class="route-order-note">${routeIsDispatchable(workflow) ? "Ready for full dispatch. The runner resolves phase dependencies." : `You can save this route as a draft. Full dispatch requires one of each phase: ${workflowKinds.join(", ")}.`}</p></div>
+      <div class="workflow-route"><div class="workflow-route-heading"><span class="step-kind">Execution route</span><h3>Workflow steps</h3><p>Add templates, then drag the step handles to arrange the route.</p><p class="route-order-note">Steps run through their selected AI tool in this order. Add, repeat, or remove any step. An empty workflow performs no work.</p></div>
       <div class="workflow-bindings ${workflow.steps.length ? "" : "is-empty"}" data-workflow-route>${workflow.steps.length ? `<div class="workflow-drop-target" data-drop-index="0"><span>Drop at start</span></div>` : `<div class="workflow-route-empty" data-drop-index="0"><span class="phase-number">+</span><div><h4>Start with an empty route</h4><p>Drag a template here, or select one from the library.</p></div></div>`}${workflow.steps.map((binding, index) => {
       const template = templateFor(binding.step_id);
       if (!template) return "";
-      const kind = template.kind;
+      const kind = escapeHtml(template.kind);
       const override = (field, label, control) => `<div class="override-field"><label class="override-toggle"><input type="checkbox" data-override="${field}" ${binding[field] !== null ? "checked" : ""}>Override ${label}</label>${control}</div>`;
       return `<section class="workflow-binding" data-binding="${index}" data-kind="${kind}"><div class="binding-head"><span class="phase-number">${String(index + 1).padStart(2, "0")}</span><div class="binding-title"><span class="step-kind">${kind}</span><h3>${escapeHtml(template.name)}</h3></div><div class="binding-order-controls"><button class="binding-drag-handle" type="button" draggable="true" data-binding-drag="${index}" aria-label="Drag ${escapeHtml(template.name)} to reorder"><span class="drag-grip" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span></button><button type="button" data-move-binding="-1" aria-label="Move ${escapeHtml(template.name)} up" ${index === 0 ? "disabled" : ""}>↑</button><button type="button" data-move-binding="1" aria-label="Move ${escapeHtml(template.name)} down" ${index === workflow.steps.length - 1 ? "disabled" : ""}>↓</button><button class="remove-binding" type="button" data-remove-binding aria-label="Remove ${escapeHtml(template.name)}">Remove</button></div></div>
         <p class="drop-hint">Drag the handle to change this step's position.</p>
-        <div class="step-field"><label for="workflow-template-${index}">Template</label><select id="workflow-template-${index}" data-template required>${phaseTemplates(kind).map(step => `<option value="${escapeHtml(step.id)}" ${step.id === binding.step_id ? "selected" : ""}>${escapeHtml(step.name)}</option>`).join("")}</select></div>
+        <div class="step-field"><label for="workflow-template-${index}">Template</label><select id="workflow-template-${index}" data-template required>${workflowConfig.steps.map(step => `<option value="${escapeHtml(step.id)}" ${step.id === binding.step_id ? "selected" : ""}>${escapeHtml(step.name)}</option>`).join("")}</select></div>
         <details class="binding-settings" ${[binding.name, binding.engine, binding.system_prompt].some(value => value != null) ? "open" : ""}><summary>Customize this step</summary><div class="override-grid">
           ${override("name", "name", `<input aria-label="Name override for step ${index + 1}" data-override-field="name" value="${escapeHtml(binding.name ?? template.name)}" maxlength="80">`)}
           ${override("engine", "tool / model", `<select aria-label="Tool / model override for step ${index + 1}" data-override-field="engine">${engineOptions({kind, engine: binding.engine || template.engine})}</select>`)}
@@ -567,12 +643,6 @@ function removeWorkflowStep(index) {
   return true;
 }
 
-function routeIsDispatchable(workflow, config = workflowConfig) {
-  const kinds = workflow.steps.map(binding => config.steps.find(step => step.id === binding.step_id)?.kind);
-  return kinds.length === workflowKinds.length
-    && workflowKinds.every(kind => kinds.filter(candidate => candidate === kind).length === 1);
-}
-
 function editWorkflow(id) {
   captureWorkflowEditor();
   if (!workflowConfig.workflows.some(flow => flow.id === id)) return;
@@ -617,7 +687,7 @@ function updateDispatchWorkflowLabel() {
   document.querySelector("#recipe-name").textContent = workflow?.name || "Built-in engineering steps";
   document.querySelector("#dispatch-workflow-help").textContent = workflow
     ? `This shared workflow runs in the selected workspace using its saved steps and overrides. Integration runs ${workflow.isolated_worktree === false ? "on the selected checkout's current branch" : "in an isolated worktree"}. A snapshot is kept with the run.`
-    : "No saved workflow is used. The built-in engineering steps run without workflow or template overrides; normal execution checks still apply.";
+    : "No saved workflow is used. The built-in AI steps run in order without workflow or template overrides.";
 }
 
 async function loadWorkflowConfiguration() {
@@ -759,7 +829,7 @@ workflowsForm.addEventListener("submit", async event => {
   if (incomplete) {
     selectedWorkflowId = incomplete.id;
     renderWorkflowSelector(); renderWorkflowEditor();
-    workflowsError.textContent = "Enter a name for every workflow before saving. Empty routes can be saved as drafts.";
+    workflowsError.textContent = "Enter a name for every workflow before saving. Empty workflows are allowed.";
     ThemeControls.validateForm(workflowsForm);
     return;
   }
@@ -782,7 +852,9 @@ const views = {
   dispatch: ["Dispatch", "Start a trusted workflow."],
   chat: ["Chat", "Ask a selected AI tool about the active workspace."],
   commands: ["CMD", "Run commands and return later to check their output."],
+  files: ["Files", "Explore the project and edit workspace files."],
   git: ["Git", "Review changes, create commits, manage branches, and sync repository remotes."],
+  "pull-requests": ["Pull requests", "Read, review, and act on GitHub, GitLab, and Bitbucket requests."],
   worktrees: ["Worktrees", "Inspect, protect, and clean up isolated workflow checkouts."],
   steps: ["Steps", "Configure shared building blocks for workflows in any workspace."],
   workflows: ["Workflows", "Build shared pipelines that any workspace can use."],
@@ -801,7 +873,9 @@ function navigatePanel(focus = false) {
     "dispatch-panel": ["overview", "dispatch"],
     "chat-panel": ["chat"],
     "commands-panel": ["commands"],
+    "files-panel": ["files"],
     "git-panel": ["git"],
+    "pull-requests-panel": ["pull-requests"],
     "worktrees-panel": ["worktrees"],
     "system-panel": ["overview", "system"],
     "runs-panel": ["overview", "runs"],
@@ -901,28 +975,28 @@ function renderMcps(expandTool = null) {
     const open = expandTool === tool || (previous ? previous.open : mcpConfig[tool].servers.length > 0);
     return `
     <${shared ? 'section class="mcp-tool"' : `details class="mcp-tool mcp-overrides" ${open ? "open" : ""}`} data-mcp-tool="${tool}">
-      ${shared ? `<div class="mcp-tool-heading"><h3>${title}</h3><span>Codex + OpenCode</span></div>` : `<summary><h3>${title}</h3><span data-mcp-count>${overrideCount(mcpConfig[tool].servers.length)}</span></summary>`}
+      ${shared ? `<div class="mcp-tool-heading"><h3>${title}</h3><span>Available to Codex and OpenCode</span></div>` : `<summary><h3>${title}</h3><span data-mcp-count>${overrideCount(mcpConfig[tool].servers.length)}</span></summary>`}
       <div class="mcp-tool-body">
       ${mcpConfig[tool].servers.map((server, index) => {
         const id = `mcp-${tool}-${index}`;
         const field = (key, label, value, extra = "") => `<div class="step-field"><label for="${id}-${key}">${label}</label><input id="${id}-${key}" data-mcp-field="${key}" value="${escapeHtml(value)}" ${extra}></div>`;
         const catalog = mcpCatalog.find(item => item.id === server.catalog_id);
         return `<div class="mcp-server" data-mcp-server="${index}" data-catalog-id="${escapeHtml(server.catalog_id || "")}" data-new-mcp="${server._new ? "true" : "false"}">
-          ${server.catalog_id ? `<p class="mcp-catalog-source">Catalog server: ${escapeHtml(catalog?.name || server.catalog_id)}. Confirm connection details with its official source.</p>` : ""}
+          <div class="mcp-server-title"><b>${escapeHtml(catalog?.name || server.name || "New server")}</b><span>${server._new ? "New draft · add connection details" : "Saved connection"}</span></div>
+          ${server.catalog_id ? `<p class="mcp-catalog-source">Check ${escapeHtml(catalog?.name || server.catalog_id)}'s official setup guide for the connection details below.</p>` : ""}
           ${field("name", "Server name", server.name, 'required pattern="[A-Za-z0-9_-]+" maxlength="64"')}
           <div class="step-field"><label for="${id}-transport">Transport</label><select id="${id}-transport" data-mcp-field="transport"><option value="http" ${server.transport === "http" ? "selected" : ""}>Remote HTTP</option><option value="stdio" ${server.transport === "stdio" ? "selected" : ""}>Local command (stdio)</option></select></div>
-          ${field("url", "HTTP server URL", server.url)}
-          ${field("bearer_token_env_var", "Bearer token environment variable (not its value)", server.bearer_token_env_var || "")}
-          ${field("command", "Command and arguments (JSON array)", JSON.stringify(server.command))}
-          ${field("env_vars", "Forward environment variables (comma-separated names)", server.env_vars.join(", "))}
+          <div class="mcp-connection-fields" data-mcp-transport="http" ${server.transport !== "http" ? "hidden" : ""}>${field("url", "Server URL", server.url, 'placeholder="https://example.com/mcp"')}${field("bearer_token_env_var", "Token environment variable (optional)", server.bearer_token_env_var || "", 'placeholder="MCP_API_TOKEN"')}</div>
+          <div class="mcp-connection-fields" data-mcp-transport="stdio" ${server.transport !== "stdio" ? "hidden" : ""}>${field("command", "Launch command (JSON array)", JSON.stringify(server.command), 'placeholder=\'["npx", "-y", "package-name"]\'')}${field("env_vars", "Environment variable names (optional)", server.env_vars.join(", "), 'placeholder="API_KEY, REGION"')}</div>
           <label class="mcp-enabled"><input type="checkbox" data-mcp-field="enabled" ${server.enabled ? "checked" : ""}>Enabled</label>
-          <button type="button" class="secondary-button" data-remove-mcp="${index}">${server._new ? "Cancel" : "Remove server"}</button>
+          <button type="button" class="secondary-button" data-remove-mcp="${index}">${server._new ? "Remove draft" : "Remove server"}</button>
         </div>`;
       }).join("")}
       <button type="button" class="secondary-button" data-add-mcp="${tool}">${shared ? "Add server" : "Add override"}</button>
       </div>
     </${shared ? "section" : "details"}>`;
   }).join("");
+  document.querySelector("#mcp-shared-count").textContent = `${mcpConfig.shared.servers.length} shared`;
 }
 
 function syncMcpDraft() {
@@ -940,13 +1014,13 @@ function renderMcpCatalog() {
   const matches = mcpCatalog.filter(item => !query || item.name.toLowerCase().includes(query));
   const visible = matches.slice(0, mcpCatalogLimit);
   const result = document.querySelector("#mcp-catalog-results");
-  document.querySelector("#mcp-catalog-count").textContent = `Showing ${visible.length} of ${matches.length} matching servers. ${mcpCatalog.length} catalog entries total.`;
+  document.querySelector("#mcp-catalog-count").textContent = `${matches.length} servers found${visible.length < matches.length ? ` · showing ${visible.length}` : ""}. Install counts are a supplied snapshot, not live statistics.`;
   document.querySelector("#mcp-catalog-more").hidden = visible.length >= matches.length;
   result.innerHTML = visible.length ? visible.map(item => `
     <article class="mcp-catalog-item">
-      <span class="mcp-catalog-rank">#${item.rank}</span>
+      <span class="mcp-catalog-rank" aria-hidden="true">${String(item.rank).padStart(2, "0")}</span>
       <div><b>${escapeHtml(item.name)}</b><span>${Number(item.weekly_installs).toLocaleString()} installs/week</span></div>
-      <button class="secondary-button" type="button" data-catalog-mcp="${item.id}" aria-label="Add shared draft for ${escapeHtml(item.name)}">Add shared draft</button>
+      <button class="secondary-button" type="button" data-catalog-mcp="${item.id}" aria-label="Set up ${escapeHtml(item.name)}">Set up <span aria-hidden="true">→</span></button>
     </article>`).join("") : `<p class="mcp-empty">No catalog servers match “${escapeHtml(query)}”. You can still add a custom server below.</p>`;
 }
 
@@ -959,6 +1033,11 @@ mcpForm.addEventListener("input", event => {
   event.target.removeAttribute("aria-describedby");
   mcpStatus.textContent = "Unsaved MCP changes";
   document.querySelector("#mcp-export-result").hidden = true;
+});
+mcpForm.addEventListener("change", event => {
+  if (!event.target.matches('[data-mcp-field="transport"]')) return;
+  const row = event.target.closest("[data-mcp-server]");
+  row.querySelectorAll("[data-mcp-transport]").forEach(group => { group.hidden = group.dataset.mcpTransport !== event.target.value; });
 });
 mcpForm.addEventListener("click", event => {
   const add = event.target.closest("[data-add-mcp]");
@@ -973,6 +1052,7 @@ mcpForm.addEventListener("click", event => {
       count.textContent = `${remaining} override${remaining === 1 ? "" : "s"}`;
     }
     section.querySelector("[data-add-mcp]").focus();
+    document.querySelector("#mcp-shared-count").textContent = `${mcpForm.querySelectorAll('[data-mcp-tool="shared"] [data-mcp-server]').length} shared`;
     mcpStatus.textContent = "Unsaved MCP changes";
     mcpError.textContent = "";
     return;
@@ -990,6 +1070,10 @@ mcpForm.addEventListener("click", event => {
 document.querySelector("#mcp-catalog-search").addEventListener("input", () => {
   mcpCatalogLimit = 12;
   renderMcpCatalog();
+});
+document.querySelector("#mcp-start").addEventListener("click", () => {
+  document.querySelector("#mcp-catalog-search").focus();
+  document.querySelector("#mcp-catalog-heading").scrollIntoView({behavior: "smooth", block: "start"});
 });
 document.querySelector("#mcp-catalog-more").addEventListener("click", () => {
   const previousCount = document.querySelectorAll("[data-catalog-mcp]").length;
@@ -1011,7 +1095,9 @@ document.querySelector("#mcp-catalog-results").addEventListener("click", event =
     renderMcps();
     mcpStatus.textContent = `Added ${item.name}. Enter its official connection details, then save.`;
     mcpError.textContent = "";
-    document.querySelector('[data-mcp-tool="shared"] [data-mcp-server]:last-of-type input').focus();
+    const row = document.querySelector('[data-mcp-tool="shared"] [data-mcp-server]:last-of-type');
+    row.querySelector('[data-mcp-field="command"]').focus();
+    row.scrollIntoView({behavior: "smooth", block: "center"});
   } catch (error) { mcpError.textContent = error.message; }
 });
 

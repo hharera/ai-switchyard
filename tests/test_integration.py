@@ -1,4 +1,5 @@
 import copy
+import threading
 
 import pytest
 
@@ -40,6 +41,48 @@ def test_preflight_checks_dependencies_without_cleanliness(monkeypatch, tmp_path
     orchestrator.preflight(plan_only=plan_only)
     assert calls == ["validate", ("rev-parse", "HEAD")]
     assert combos == ([] if plan_only else sorted(orchestrator.settings.combos))
+
+
+def test_independent_ticket_subagents_run_in_parallel_and_keep_stable_order(
+    monkeypatch, tmp_path
+):
+    orchestrator = EngineeringOrchestrator(
+        tmp_path, Settings(max_parallel_tickets=2)
+    )
+    tickets = [
+        Ticket(id="B", title="B", description="B", acceptance_criteria=["done"]),
+        Ticket(id="A", title="A", description="A", acceptance_criteria=["done"]),
+    ]
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def execute_ticket(run_id, ticket, start_point):
+        nonlocal active, maximum
+        assert run_id == "run-1"
+        assert start_point == "base"
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        barrier.wait(timeout=2)
+        with lock:
+            active -= 1
+        return []
+
+    monkeypatch.setattr(orchestrator, "execute_ticket", execute_ticket)
+    monkeypatch.setattr(
+        orchestrator, "select_candidate",
+        lambda ticket, results: CandidateDecision(selected_fork=1, rationale=ticket.id),
+    )
+    monkeypatch.setattr(orchestrator, "save_run", lambda run: None)
+    run = {"run_id": "run-1", "tickets": []}
+
+    prepared = orchestrator._execute_ticket_batch(run, tickets, "base")
+
+    assert maximum == 2
+    assert [ticket.id for ticket, _, _ in prepared] == ["B", "A"]
+    assert [entry["status"] for entry in run["tickets"]] == ["ready", "ready"]
 
 
 def test_run_preserves_dirty_checkout(monkeypatch, tmp_path):
@@ -92,7 +135,7 @@ def test_run_preserves_dirty_checkout(monkeypatch, tmp_path):
         lambda *args: ReviewReport(approved=True, summary="Approved"),
     )
 
-    result = orchestrator.run("Update sample")
+    result = orchestrator._run_engineering("Update sample")
 
     assert result["status"] == "approved"
     stages = [stage for stage, _ in progress]
@@ -234,7 +277,7 @@ def test_run_prepares_baseline_before_planning(monkeypatch, tmp_path, existing_g
 
     monkeypatch.setattr(orchestrator, "plan", plan)
     with pytest.raises(RuntimeError, match="Stop before calling any agents"):
-        orchestrator.run("Implement a change")
+        orchestrator._run_engineering("Implement a change")
     assert repo.git("rev-list", "--count", "HEAD").stdout.strip() == "1"
 
 
@@ -271,7 +314,7 @@ def test_failed_baseline_stops_dispatch_before_agents(monkeypatch, tmp_path):
         "Planning must not start without a baseline"
     ))
     with pytest.raises(ProcessError, match="Cannot create baseline commit"):
-        orchestrator.run("Implement a change")
+        orchestrator._run_engineering("Implement a change")
     assert (root / "source.txt").read_text() == "keep this content"
     assert not real_git("rev-parse", "--verify", "HEAD", check=False).passed
 

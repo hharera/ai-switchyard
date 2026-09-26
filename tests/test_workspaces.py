@@ -21,6 +21,11 @@ from ninerouter_orchestrator.workspace_config import (
 client = TestClient(web.app, headers={"x-switchyard-client": "local-ui"})
 
 
+def test_workspace_defaults_to_one_attempt_per_ticket(tmp_path):
+    workspace = Workspace(id="default", name="Default", repository=str(tmp_path))
+    assert workspace.forks_per_ticket == 1
+
+
 @pytest.fixture
 def configured(monkeypatch, tmp_path):
     root = repository(tmp_path)
@@ -49,6 +54,7 @@ def test_workspace_persistence_and_validation(configured):
     loaded = WorkspaceStore(web.workspace_store.path).get()
     assert loaded.resolve("alpha").run_settings() == {
         "forks_per_ticket": 2,
+        "max_parallel_tickets": 1,
         "command_timeout_seconds": 300,
     }
     assert client.get("/api/workspaces").json() == loaded.model_dump()
@@ -57,6 +63,7 @@ def test_workspace_persistence_and_validation(configured):
         {"repository": " "},
         {"name": " "},
         {"forks_per_ticket": 6},
+        {"max_parallel_tickets": 9},
         {"command_timeout_seconds": 2},
         {"git_base_branch": "-unsafe"},
     ):
@@ -178,6 +185,8 @@ def test_corrupt_configuration_is_not_silently_replaced(configured):
 def test_workspace_controls_git_path_and_default_base(configured):
     assert save(configured).status_code == 200
     result = client.get("/api/git/status", params={"workspace_id": "alpha", "repository": "/wrong"})
+    assert result.status_code == 422
+    result = client.get("/api/git/status", params={"workspace_id": "alpha"})
     assert result.status_code == 200
     assert result.json()["repository"] == configured.repository
     result = client.get("/api/git/status", params={"workspace_id": "alpha", "comparison": "branch"})
@@ -186,7 +195,84 @@ def test_workspace_controls_git_path_and_default_base(configured):
     assert client.get("/api/git/status", params={"workspace_id": "unknown"}).status_code == 422
 
 
+def test_git_api_discovers_and_operates_on_nested_repositories(configured):
+    workspace = Path(configured.repository)
+    nested = workspace / "apps" / "backend"
+    nested.mkdir(parents=True)
+    git(nested, "init", "-b", "main")
+    git(nested, "config", "user.name", "Nested Test")
+    git(nested, "config", "user.email", "nested@example.test")
+    (nested / "service.py").write_text("print('one')\n")
+    git(nested, "add", "service.py")
+    git(nested, "commit", "-m", "nested base")
+    (nested / "service.py").write_text("print('two')\n")
+    assert save(configured).status_code == 200
+
+    repositories = client.get("/api/git/repositories", params={"workspace_id": "alpha"})
+    assert repositories.status_code == 200
+    assert [item["relative_path"] for item in repositories.json()["repositories"]] == [
+        ".", "apps/backend"
+    ]
+    status = client.get(
+        "/api/git/status",
+        params={"workspace_id": "alpha", "repository": str(nested)},
+    )
+    assert status.status_code == 200
+    assert status.json()["repository"] == str(nested)
+    assert [item["path"] for item in status.json()["files"]] == ["service.py"]
+    history = client.get(
+        "/api/git/log",
+        params={"workspace_id": "alpha", "repository": str(nested), "ref": "refs/heads/main"},
+    )
+    assert history.status_code == 200
+    assert history.json()["selected_ref"] == "refs/heads/main"
+    assert history.json()["refs"][0]["name"] == "main"
+
+    action = client.post(
+        "/api/git/action",
+        json={
+            "workspace_id": "alpha",
+            "repository": str(nested),
+            "action": "stage",
+            "paths": ["service.py"],
+        },
+    )
+    assert action.status_code == 200
+    assert git(nested, "diff", "--cached", "--name-only") == "service.py"
+    assert git(workspace, "diff", "--cached", "--name-only") == ""
+
+
+def test_git_api_rejects_repository_outside_workspace(configured, tmp_path):
+    (tmp_path / "other").mkdir()
+    outside = repository(tmp_path / "other")
+    assert save(configured).status_code == 200
+    for method, path, values in (
+        (client.get, "/api/git/status", {"params": {"workspace_id": "alpha", "repository": str(outside)}}),
+        (client.get, "/api/git/log", {"params": {"workspace_id": "alpha", "repository": str(outside)}}),
+        (client.post, "/api/git/action", {"json": {"workspace_id": "alpha", "repository": str(outside), "action": "fetch"}}),
+    ):
+        assert method(path, **values).status_code == 422
+    link = Path(configured.repository) / "external"
+    link.symlink_to(outside, target_is_directory=True)
+    assert client.get(
+        "/api/git/log", params={"workspace_id": "alpha", "repository": str(link)}
+    ).status_code == 422
+
+
+def test_git_log_does_not_scan_large_working_tree(configured, monkeypatch):
+    assert save(configured).status_code == 200
+
+    def unavailable_working_tree(self):
+        raise AssertionError("Log must not scan working files")
+
+    monkeypatch.setattr(web.GitReview, "working_files", unavailable_working_tree)
+    response = client.get("/api/git/log", params={"workspace_id": "alpha"})
+    assert response.status_code == 200
+    assert response.json()["commits"][0]["subject"] == "base"
+
+
 def test_dispatch_inherits_workspace_and_snapshots_defaults(configured, monkeypatch):
+    configured.max_parallel_tickets = 4
     assert save(configured).status_code == 200
     captured = {}
 
@@ -214,8 +300,10 @@ def test_dispatch_inherits_workspace_and_snapshots_defaults(configured, monkeypa
     assert job["workflow_id"] == configured.workflow_id
     assert job["run_settings"] == captured["args"][3] == configured.run_settings()
     configured.command_timeout_seconds = 900
+    configured.max_parallel_tickets = 1
     assert save(configured).status_code == 200
     assert web.store.get(job["id"])["run_settings"]["command_timeout_seconds"] == 300
+    assert web.store.get(job["id"])["run_settings"]["max_parallel_tickets"] == 4
 
 
 def test_shared_workflow_can_dispatch_in_multiple_workspaces(configured, monkeypatch, tmp_path):
@@ -306,6 +394,7 @@ def test_workspace_can_use_builtin_workflow(configured, monkeypatch):
 
 
 def test_worker_uses_snapshotted_settings(configured, monkeypatch):
+    configured.max_parallel_tickets = 4
     save(configured)
     observed = {}
 
@@ -334,6 +423,7 @@ def test_worker_uses_snapshotted_settings(configured, monkeypatch):
         configured.run_settings(),
     )
     assert observed["settings"].forks_per_ticket == 2
+    assert observed["settings"].max_parallel_tickets == 4
     assert observed["settings"].command_timeout_seconds == 300
     assert observed["settings"].allow_host_execution
     assert web.store.get(job["id"])["status"] == "needs_repair"

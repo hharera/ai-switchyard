@@ -141,7 +141,7 @@
     try { localStorage.setItem("switchyard.workspace", activeId || ""); } catch { /* Selection still works without storage. */ }
     repositoryInput.value = workspace?.repository || "";
     document.querySelector("#dispatch-workspace-settings").textContent = workspace
-      ? `${workspace.repository} | ${workspace.forks_per_ticket} attempts per ticket | ${workspace.command_timeout_seconds}s command timeout`
+      ? `${workspace.repository} | ${workspace.forks_per_ticket} attempts per ticket | ${workspace.max_parallel_tickets || 1} parallel tickets | ${workspace.command_timeout_seconds}s command timeout`
       : "Add a workspace before dispatching.";
     document.querySelector("#allow-host").checked = false;
     if (workspace) {
@@ -162,7 +162,7 @@
 
   function renderList() {
     document.querySelector("#workspace-list").innerHTML = config.workspaces.length
-      ? config.workspaces.map(item => `<article class="workspace-card ${item.id === activeId ? "selected" : ""}"><h3>${escapeHtml(item.name)}</h3><p>${escapeHtml(item.repository)}</p><small>${item.forks_per_ticket} attempts / ${item.command_timeout_seconds}s${item.id === config.default_workspace_id ? " / Default" : ""}</small><div><button type="button" class="secondary-button" data-use-workspace="${escapeHtml(item.id)}" ${item.id === activeId ? "disabled" : ""}>${item.id === activeId ? "Active workspace" : "Use workspace"}</button><button type="button" class="secondary-button" data-edit-workspace="${escapeHtml(item.id)}">Edit</button></div></article>`).join("")
+      ? config.workspaces.map(item => `<article class="workspace-card ${item.id === activeId ? "selected" : ""}"><h3>${escapeHtml(item.name)}</h3><p>${escapeHtml(item.repository)}</p><small>${item.forks_per_ticket} attempts / ${item.max_parallel_tickets || 1} parallel tickets / ${item.command_timeout_seconds}s${item.id === config.default_workspace_id ? " / Default" : ""}</small><div><button type="button" class="secondary-button" data-use-workspace="${escapeHtml(item.id)}" ${item.id === activeId ? "disabled" : ""}>${item.id === activeId ? "Active workspace" : "Use workspace"}</button><button type="button" class="secondary-button" data-edit-workspace="${escapeHtml(item.id)}">Edit</button></div></article>`).join("")
       : '<div class="empty-state"><b>No saved workspaces</b><span>Add a repository and its run defaults. Repository files are never moved or deleted.</span></div>';
   }
 
@@ -177,7 +177,8 @@
     field("workflow").innerHTML = workflowOptions(workflow);
     field("workflow").value = workflow;
     window.ThemeControls?.refreshSelect(field("workflow"));
-    field("forks").value = workspace?.forks_per_ticket || 3;
+    field("forks").value = workspace?.forks_per_ticket || 1;
+    field("parallel-tickets").value = workspace?.max_parallel_tickets || 1;
     field("timeout").value = workspace?.command_timeout_seconds || 1800;
     field("git-base").value = workspace?.git_base_branch || "main";
     field("default").checked = workspace ? config.default_workspace_id === id : !config.workspaces.length;
@@ -275,7 +276,9 @@
     const workspace = {
       id, name: field("name").value.trim(), repository: field("repository").value.trim(),
       workflow_id: field("workflow").value || null,
-      forks_per_ticket: Number(field("forks").value), command_timeout_seconds: Number(field("timeout").value),
+      forks_per_ticket: Number(field("forks").value),
+      max_parallel_tickets: Number(field("parallel-tickets").value),
+      command_timeout_seconds: Number(field("timeout").value),
       git_base_branch: field("git-base").value.trim(), delivery: readDelivery("workspace"),
     };
     const candidate = structuredClone(config);

@@ -116,6 +116,76 @@ class GitRepository:
         output = self.git("status", "--porcelain", cwd=workspace).stdout
         return [line[3:] for line in output.splitlines() if len(line) > 3]
 
+    def change_summary(
+        self, workspace: Path, *, base: str, target: str | None = None
+    ) -> dict:
+        """Return a compact, UI-ready summary of changes since the run baseline."""
+        revision_args = [base, target] if target else [base]
+        status_output = self.git(
+            "diff", "--no-ext-diff", "--name-status", "-z", *revision_args, "--", cwd=workspace
+        ).stdout
+        numstat_output = self.git(
+            "diff", "--no-ext-diff", "--numstat", "-z", *revision_args, "--", cwd=workspace
+        ).stdout
+        statuses = []
+        status_parts = iter(status_output.rstrip("\0").split("\0"))
+        for status in status_parts:
+            if not status:
+                continue
+            path = next(status_parts)
+            entry = {"status": status[0], "path": path, "additions": None, "deletions": None}
+            if status[0] in {"R", "C"}:
+                entry.update(previous_path=path, path=next(status_parts))
+            statuses.append(entry)
+
+        by_path = {entry["path"]: entry for entry in statuses}
+        numstat_parts = iter(numstat_output.rstrip("\0").split("\0"))
+        for record in numstat_parts:
+            if not record:
+                continue
+            additions, deletions, path = record.split("\t", 2)
+            # With -z, renames have an empty path followed by old and new paths.
+            if not path:
+                next(numstat_parts)
+                path = next(numstat_parts)
+            if path in by_path:
+                by_path[path].update(
+                    additions=int(additions) if additions.isdigit() else None,
+                    deletions=int(deletions) if deletions.isdigit() else None,
+                )
+
+        if target is None:
+            untracked = self.git(
+                "ls-files", "--others", "--exclude-standard", "-z", cwd=workspace
+            ).stdout
+            for path in untracked.split("\0"):
+                if not path or path in by_path:
+                    continue
+                statuses.append(
+                    {
+                        "status": "A",
+                        "path": path,
+                        "additions": None,
+                        "deletions": None,
+                        "untracked": True,
+                    }
+                )
+
+        additions = sum(entry["additions"] or 0 for entry in statuses)
+        deletions = sum(entry["deletions"] or 0 for entry in statuses)
+        return {
+            "base": base,
+            "target": target,
+            "files": statuses,
+            "file_count": len(statuses),
+            "additions": additions,
+            "deletions": deletions,
+            "unknown_counts": sum(
+                entry["additions"] is None or entry["deletions"] is None
+                for entry in statuses
+            ),
+        }
+
     def commit_all(self, workspace: Path, message: str) -> str | None:
         if not self.changed_files(workspace):
             return None

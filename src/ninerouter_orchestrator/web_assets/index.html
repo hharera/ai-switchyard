@@ -12,6 +12,10 @@
     <link rel="stylesheet" href="/assets/styles.css">
     <link rel="stylesheet" href="/assets/chat.css">
     <link rel="stylesheet" href="/assets/worktrees.css">
+    <link rel="stylesheet" href="/assets/files.css">
+    <link rel="stylesheet" href="/assets/inline-agent.css">
+    <link rel="stylesheet" href="/assets/pull-requests.css">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   </head>
   <body>
     <div class="page-grid" aria-hidden="true"></div>
@@ -26,7 +30,9 @@
         <a href="#dispatch" data-panel="dispatch">Dispatch</a>
         <a href="#chat" data-panel="chat">Chat</a>
         <a href="#commands" data-panel="commands">CMD <span id="command-nav-count" class="nav-live-count" hidden></span></a>
+        <a href="#files" data-panel="files">Files <span id="files-dirty-count" class="nav-live-count" hidden></span></a>
         <a href="#git" data-panel="git">Git</a>
+        <a href="#pull-requests" data-panel="pull-requests">Pull requests</a>
         <a href="#worktrees" data-panel="worktrees">Worktrees</a>
         <a href="#steps" data-panel="steps">Steps</a>
         <a href="#workflows" data-panel="workflows">Workflows</a>
@@ -51,7 +57,8 @@
               <div class="step-field"><label for="workspace-name">Name</label><input id="workspace-name" required maxlength="80" autocomplete="off"></div>
               <div class="step-field workspace-wide"><label for="workspace-repository">Repository path</label><div class="repository-controls"><input id="workspace-repository" required autocomplete="off" list="workspace-recent-paths" placeholder="/path/to/repository"><button class="secondary-button" id="browse-workspace" type="button">Browse folders</button></div><datalist id="workspace-recent-paths"></datalist><p class="field-note">Choose a local folder. If it is not a Git repository, Git is initialized when you save. Previously used paths appear as suggestions.</p></div>
               <div class="step-field"><label for="workspace-workflow">Default workflow (optional)</label><select id="workspace-workflow" aria-describedby="workspace-workflow-help"></select><p class="field-note" id="workspace-workflow-help">Choose from the shared library. This sets a dispatch default, not a workspace-owned copy.</p></div>
-              <div class="step-field"><label for="workspace-forks">Attempts per ticket</label><input id="workspace-forks" type="number" min="1" max="5" value="3" required></div>
+              <div class="step-field"><label for="workspace-forks">Attempts per ticket</label><input id="workspace-forks" type="number" min="1" max="5" value="1" required></div>
+              <div class="step-field"><label for="workspace-parallel-tickets">Parallel tickets</label><input id="workspace-parallel-tickets" type="number" min="1" max="8" value="1" required aria-describedby="workspace-parallel-tickets-help"><p class="field-note" id="workspace-parallel-tickets-help">Run independent tickets at the same time. Dependencies still wait.</p></div>
               <div class="step-field"><label for="workspace-timeout">Command timeout (seconds)</label><input id="workspace-timeout" type="number" min="30" max="7200" value="1800" required></div>
               <div class="step-field"><label for="workspace-git-base">Git comparison base</label><input id="workspace-git-base" value="main" required maxlength="240"></div>
             </div>
@@ -219,24 +226,87 @@
           </details>
         </div>
       </section>
+      <section id="files-panel" class="files-panel" aria-label="Workspace file editor" hidden>
+        <header class="files-toolbar">
+          <div class="files-project-identity"><span class="files-project-mark" aria-hidden="true">SY</span><div><h2 id="files-project-name">Project</h2><span id="files-project-path">Select a workspace to explore its files.</span></div></div>
+          <div class="files-actions"><button type="button" data-inline-agent="files">Agent</button><button id="files-toggle-project" type="button" aria-expanded="true" aria-controls="files-project">Hide project</button><button id="files-refresh" type="button" disabled>Refresh tree</button><button id="files-git-actions" type="button" aria-haspopup="menu" aria-expanded="false" disabled>File actions</button><button id="files-find-open" type="button" disabled>Find in file</button><button id="files-save" class="files-save" type="button" disabled>Save file <kbd>Ctrl S</kbd></button></div>
+        </header>
+        <div class="files-workbench" id="files-workbench">
+          <aside id="files-project" class="files-project" aria-labelledby="files-project-heading">
+            <div class="files-pane-heading"><h3 id="files-project-heading"><button id="files-root-actions" type="button" aria-label="Project root actions" aria-haspopup="menu" aria-expanded="false">Project</button></h3><span><span id="files-git-summary"></span><span id="files-tree-count"></span></span></div>
+            <div class="files-filter"><label for="files-filter">Filter loaded files</label><input id="files-filter" type="search" placeholder="File or folder name" autocomplete="off" disabled></div>
+            <div id="files-tree" class="files-tree" aria-label="Project files" aria-busy="false"></div>
+            <p class="files-tree-note">Select or right-click an item to create, rename, delete, or manage Git changes. Folder Git actions include collapsed descendants.</p>
+          </aside>
+          <section class="files-editors" aria-label="Editor">
+            <div id="files-tabs" class="files-tabs" role="tablist" aria-label="Open files"></div>
+            <div id="files-breadcrumbs" class="files-breadcrumbs" aria-label="Current file path">No file open</div>
+            <div id="files-error" class="files-error" role="alert" hidden></div>
+            <div id="files-empty" class="files-empty"><span class="files-empty-mark" aria-hidden="true">{ }</span><h3>Open a file to start editing</h3><p>Select a file from the project tree. Edits stay in this tab until you save them to disk.</p><a href="#workspaces">Choose a workspace</a><div class="files-shortcuts"><span>Save file <kbd>Ctrl / Cmd S</kbd></span><span>Find in file <kbd>Ctrl / Cmd F</kbd></span><span>Indent selection <kbd>Tab</kbd></span><span>Leave editor <kbd>Esc, then Tab</kbd></span></div></div>
+            <div id="files-editor-panel" class="files-editor-panel" role="tabpanel" hidden>
+              <form id="files-find-bar" class="files-find-bar" hidden><label for="files-find">Find in file</label><input id="files-find" type="search" autocomplete="off"><button type="submit">Find next</button><button id="files-find-close" type="button" aria-label="Close find in file">Close</button><span id="files-find-result" role="status"></span></form>
+              <div class="files-editor-surface" id="files-editor-surface" dir="ltr">
+                <pre id="files-gutter" class="files-gutter" aria-hidden="true">1</pre>
+                <pre id="files-highlight" class="files-highlight" aria-hidden="true"></pre>
+                <label for="files-content" class="workflow-sr-only" id="files-content-label">File contents</label>
+                <textarea id="files-content" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-describedby="files-editor-help"></textarea>
+              </div>
+              <div class="files-editor-footer"><span id="files-editor-help">UTF-8 text files up to 2 MB. Save writes to the active workspace.</span><button id="files-reload" type="button">Reload from disk</button></div>
+            </div>
+          </section>
+        </div>
+        <footer class="files-statusbar"><span id="files-status" role="status">Select a workspace to get started.</span><span id="files-position"></span><span id="files-format"></span></footer>
+        <div id="files-git-menu" class="files-git-menu" role="menu" aria-label="File and Git actions" hidden>
+          <header><b id="files-git-menu-name">File actions</b><span id="files-git-menu-detail"></span></header>
+          <button type="button" role="menuitem" data-files-open-in-manager>Open in Files</button>
+          <div class="files-menu-separator" role="separator"></div>
+          <button type="button" role="menuitem" data-files-entry-action="create_file">Create file</button>
+          <button type="button" role="menuitem" data-files-entry-action="create_folder">Create folder</button>
+          <button type="button" role="menuitem" data-files-entry-action="rename">Rename</button>
+          <button type="button" role="menuitem" data-files-entry-action="delete" class="files-git-danger">Delete from disk</button>
+          <div class="files-menu-separator" role="separator"></div>
+          <button type="button" role="menuitem" data-files-git-action="diff">Show changes</button>
+          <button type="button" role="menuitem" data-files-git-action="stage"><span>Stage changes</span><small data-files-git-count="stage"></small></button>
+          <button type="button" role="menuitem" data-files-git-action="unstage"><span>Unstage changes</span><small data-files-git-count="unstage"></small></button>
+          <button type="button" role="menuitem" data-files-git-action="discard" class="files-git-danger"><span>Discard tracked edits</span><small data-files-git-count="discard"></small></button>
+          <button type="button" role="menuitem" data-files-git-action="delete_untracked" class="files-git-danger"><span>Delete untracked files</span><small data-files-git-count="delete_untracked"></small></button>
+          <a href="#git" role="menuitem">Open Git workspace to commit</a>
+        </div>
+        <dialog id="files-git-diff" class="files-git-diff" aria-labelledby="files-git-diff-title">
+          <header><h3 id="files-git-diff-title">File changes</h3><form method="dialog"><button type="submit" autofocus>Close changes</button></form></header>
+          <label for="files-git-diff-path">Changed file</label><select id="files-git-diff-path"></select>
+          <p>Saved changes compared with HEAD. Unsaved editor changes are not included.</p>
+          <div id="files-git-diff-body" aria-live="polite"></div>
+        </dialog>
+        <dialog id="files-entry-dialog" class="files-entry-dialog" aria-labelledby="files-entry-dialog-title">
+          <form id="files-entry-form">
+            <h3 id="files-entry-dialog-title">Create file</h3>
+            <p id="files-entry-dialog-location"></p>
+            <label for="files-entry-name">Name</label>
+            <input id="files-entry-name" name="name" autocomplete="off" maxlength="255" required aria-describedby="files-entry-error">
+            <p id="files-entry-error" class="files-entry-error" role="alert"></p>
+            <div><button id="files-entry-cancel" type="button">Cancel</button><button id="files-entry-submit" type="submit">Create file</button></div>
+          </form>
+        </dialog>
+      </section>
       <section class="hero" id="overview-panel">
         <div class="hero-copy">
           <p class="eyebrow">Engineering orchestration / local control</p>
-          <h2>Plan. Fork.<br><em>Prove. Review.</em></h2>
-          <p class="lede">Codex plans and reviews. Three independent attempts travel through stable 9router combos. You choose when execution begins.</p>
+          <h2>Compose. Run.<br><em>Inspect. Refine.</em></h2>
+          <p class="lede">Configure your steps, choose an AI tool for each, and run them in order. You choose when execution begins.</p>
         </div>
         <div class="routing-lattice" aria-label="Workflow routing diagram">
           <div class="route-label label-in">REQUEST</div>
-          <div class="route-node source"><span>LEAD</span><b>Codex</b></div>
+          <div class="route-node source"><span>STEP 01</span><b>AI tool</b></div>
           <div class="trunk trunk-a"></div>
           <div class="fork-lines"><i></i><i></i><i></i></div>
           <div class="fork-nodes">
-            <div class="route-node"><span>FORK A</span><b>Build</b></div>
-            <div class="route-node"><span>FORK B</span><b>Harden</b></div>
-            <div class="route-node"><span>FORK C</span><b>Rethink</b></div>
+            <div class="route-node"><span>STEP 02</span><b>Prompt</b></div>
+            <div class="route-node"><span>STEP 03</span><b>Prompt</b></div>
+            <div class="route-node"><span>STEP N</span><b>Prompt</b></div>
           </div>
           <div class="trunk trunk-b"></div>
-          <div class="route-node destination"><span>GATE</span><b>Review</b></div>
+          <div class="route-node destination"><span>RESULT</span><b>Committed</b></div>
           <div class="signal signal-one"></div>
           <div class="signal signal-two"></div>
           <div class="signal signal-three"></div>
@@ -313,10 +383,19 @@
           <h2>Git workspace</h2>
           <p>Review changes, prepare commits, manage branches, sync remotes, and recover in-progress operations.</p>
         </div>
-        <button class="secondary-button" id="refresh-git" type="button">Refresh changes</button>
+        <div class="git-heading-actions"><button class="secondary-button" type="button" data-inline-agent="git">Agent</button><button class="secondary-button" id="refresh-git" type="button">Refresh changes</button></div>
       </div>
       <form id="git-controls" class="git-controls">
         <input id="git-repository" type="hidden">
+        <div class="git-repository-picker">
+          <label for="git-repository-select">Repository</label>
+          <select id="git-repository-select" aria-describedby="git-repository-note"></select>
+          <span id="git-repository-note">Finds up to 50 Git roots within six folder levels. Dependency and build folders are skipped.</span>
+        </div>
+        <div class="git-view-tabs" role="tablist" aria-label="Git view">
+          <button id="git-changes-tab" type="button" role="tab" data-git-view="changes" aria-selected="true" aria-controls="git-content">Local changes</button>
+          <button id="git-log-tab" type="button" role="tab" data-git-view="log" aria-selected="false" aria-controls="git-content" tabindex="-1">Log</button>
+        </div>
         <fieldset class="git-comparison">
           <legend>Compare</legend>
           <label><input type="radio" name="git-comparison" value="working" checked><span>All changes</span></label>
@@ -344,9 +423,46 @@
           <div class="git-button-row"><button class="secondary-button" value="cancel" autofocus>Cancel</button><button class="secondary-button danger-button" id="git-confirm-accept" value="confirm">Confirm action</button></div>
         </form>
       </dialog>
-      <div id="git-content" class="git-content">
+      <div id="git-content" class="git-content" role="tabpanel" aria-labelledby="git-changes-tab">
         <div class="git-empty"><b>Select a repository to manage</b><span>Choose a workspace to inspect changes and run Git operations.</span></div>
       </div>
+    </section>
+    <section id="pull-requests-panel" class="pr-panel" aria-labelledby="pr-heading" hidden>
+      <div class="git-heading">
+        <div><p class="eyebrow">Remote review</p><h2 id="pr-heading">Pull requests</h2><p id="pr-repository">Uses the active workspace's delivery remote.</p></div>
+        <button class="secondary-button" id="pr-refresh" type="button">Refresh requests</button>
+      </div>
+      <div class="pr-toolbar">
+        <div class="step-field pr-repository-field"><label for="pr-repository-select">Repository</label><select id="pr-repository-select" disabled aria-describedby="pr-repository-note"><option value="">Choose a workspace</option></select></div>
+        <div class="step-field"><label for="pr-provider">Provider</label><select id="pr-provider"><option value="auto">Detect from remote</option><option value="github">GitHub</option><option value="gitlab">GitLab</option><option value="bitbucket">Bitbucket</option></select></div>
+        <div class="step-field"><label for="pr-state">State</label><select id="pr-state"><option value="open">Open</option><option value="closed">Closed and merged</option><option value="all">All states</option></select></div>
+        <div class="step-field pr-search"><label for="pr-search">Search this page</label><input id="pr-search" type="search" placeholder="Title, author, branch, or number" autocomplete="off"></div>
+      </div>
+      <p id="pr-repository-note" class="field-note">Finds Git repositories inside the workspace, including nested projects. Uses the selected repository's workspace-configured delivery remote.</p>
+      <p id="pr-credentials" class="field-note">Supports GitHub.com, GitLab.com, and Bitbucket Cloud. Credentials stay on the server.</p>
+      <section id="pr-setup" class="pr-setup" aria-labelledby="pr-setup-title" hidden>
+        <h3 id="pr-setup-title"></h3>
+        <p id="pr-setup-message" class="pr-notice"></p>
+        <p id="pr-auth-instructions" class="pr-notice" hidden>Run this command in a terminal on the machine running Switchyard, then check again: <code id="pr-auth-command"></code></p>
+        <div class="pr-setup-actions">
+          <a id="pr-install-cli" class="secondary-button" target="_blank" rel="noopener noreferrer" hidden></a>
+          <button id="pr-copy-auth" class="secondary-button" type="button" hidden>Copy sign-in command</button>
+          <button id="pr-check-setup" class="secondary-button" type="button">Check again</button>
+        </div>
+        <p id="pr-setup-status" class="field-note" role="status"></p>
+      </section>
+      <p id="pr-status" class="field-note" role="status"></p>
+      <p id="pr-error" class="form-error" role="alert" tabindex="-1"></p>
+      <div class="pr-workbench">
+        <aside class="pr-inbox" aria-label="Review inbox">
+          <div id="pr-list" aria-busy="false"></div>
+          <div class="pr-pagination"><button id="pr-previous" type="button" class="secondary-button" disabled>Previous</button><span id="pr-page">Page 1</span><button id="pr-next" type="button" class="secondary-button" disabled>Next</button></div>
+        </aside>
+        <div id="pr-detail" class="pr-detail" aria-busy="false"><div class="git-empty"><b>Select a request to review</b><span>Choose a workspace, then refresh the review inbox.</span></div></div>
+      </div>
+      <dialog id="pr-confirm" class="git-confirm" aria-labelledby="pr-confirm-title" aria-describedby="pr-confirm-message">
+        <form method="dialog"><h3 id="pr-confirm-title">Confirm provider action</h3><p id="pr-confirm-message"></p><div class="git-button-row"><button class="secondary-button" value="cancel" autofocus>Cancel</button><button id="pr-confirm-accept" class="secondary-button" value="confirm">Confirm action</button></div></form>
+      </dialog>
     </section>
     <section id="worktrees-panel" class="worktrees-panel" aria-labelledby="worktrees-heading" hidden>
       <div class="workflow-heading">
@@ -371,7 +487,7 @@
           <div>
             <p class="eyebrow">Reusable building blocks</p>
             <div class="template-catalog-title"><h2>Step templates</h2><span id="template-count" class="template-count"></span></div>
-            <p>Configure shared templates with a step type, default tool/model, and prompt. Reuse each template in any compatible workflow across all workspaces.</p>
+            <p>Configure shared templates with a category, default tool/model, and prompt. Reuse each template in any workflow across all workspaces.</p>
           </div>
         </div>
         <p class="scope-note"><b>No execution order here</b><span>Templates are independent building blocks. <a href="#workflows">Workflows</a> define their sequence. Per-workflow overrides never change the shared template.</span></p>
@@ -396,7 +512,7 @@
           <ol class="workflow-guide" aria-label="How to build a workflow">
             <li><span>01</span><div><b>Choose</b><small>Select a workflow or create one.</small></div></li>
             <li><span>02</span><div><b>Build</b><small>Add steps and drag them into order.</small></div></li>
-            <li><span>03</span><div><b>Save</b><small>Save the workflow or keep it as a draft.</small></div></li>
+            <li><span>03</span><div><b>Save</b><small>Save the workflow to use it in a workspace.</small></div></li>
           </ol>
         </div>
         <p class="scope-note"><b>Shared across all workspaces</b><span>No workspace is needed to create or edit a workflow. Saved changes apply to future runs wherever it is used. Existing runs keep their snapshots.</span></p>
@@ -408,12 +524,12 @@
         <div id="workflow-editor"></div>
         <p id="workflow-dnd-announcement" class="workflow-sr-only" role="status"></p>
         <div class="form-error" id="workflows-error" role="alert"></div><p id="workflows-status" class="field-note" role="status"></p>
-        <div class="workflow-actions" id="workflow-actions" hidden><div class="workflow-run-options"><label class="mcp-enabled"><input id="default-workflow" type="checkbox">Use as default for new dispatches</label><label class="mcp-enabled"><input id="workflow-isolated-worktree" type="checkbox" aria-describedby="workflow-isolated-worktree-help">Use an isolated integration worktree</label><span id="workflow-isolated-worktree-help">Keeps the selected checkout unchanged. Turn this off to integrate commits into its current branch; candidate attempts still use separate worktrees.</span></div><button class="dispatch-button compact-button" type="submit"><span>Save changes</span><i aria-hidden="true"></i></button></div>
+        <div class="workflow-actions" id="workflow-actions" hidden><div class="workflow-run-options"><label class="mcp-enabled"><input id="default-workflow" type="checkbox">Use as default for new dispatches</label><label class="mcp-enabled"><input id="workflow-isolated-worktree" type="checkbox" aria-describedby="workflow-isolated-worktree-help">Use an isolated workflow worktree</label><span id="workflow-isolated-worktree-help">Keeps the selected checkout unchanged. Turn this off to run every step on its current branch.</span></div><button class="dispatch-button compact-button" type="submit"><span>Save changes</span><i aria-hidden="true"></i></button></div>
       </form>
     </section>
     <section id="mcps-panel" class="mcps-panel" aria-label="MCP configuration">
-      <div class="workflow-heading mcp-heading"><div><h2>MCP servers</h2><p>Share connections across workspaces. Add an override only when Codex or OpenCode needs different settings.</p></div></div>
-      <p class="field-note">Only add trusted servers. They can run local commands or change external data.</p>
+      <div class="mcp-intro"><div><p class="eyebrow">MCP servers / all workspaces</p><h2>Give your tools a new connection.</h2><p>Choose a server, add its official connection details, and save it for future runs.</p><button class="dispatch-button compact-button" id="mcp-start" type="button">Find a server <span aria-hidden="true">↗</span></button></div><div class="mcp-path" aria-label="Setup steps"><span><b>1</b> Choose a server</span><span><b>2</b> Add connection details</span><span><b>3</b> Save for future runs</span></div></div>
+      <p class="mcp-trust-note">Only add trusted servers. They may run local commands or change external data.</p>
       <details class="configuration-note">
         <summary>Scope and safety</summary>
         <div>
@@ -422,16 +538,17 @@
         </div>
       </details>
       <section class="mcp-catalog" aria-labelledby="mcp-catalog-heading">
-        <div class="mcp-catalog-heading"><div><h3 id="mcp-catalog-heading">MCP catalog</h3><p class="field-note">Start a shared draft from the supplied list. Each entry needs connection details from its official source; it is not installed or tested here. Install counts are a supplied snapshot, not live statistics.</p></div><div class="step-field"><label for="mcp-catalog-search">Find an MCP</label><input id="mcp-catalog-search" type="search" autocomplete="off" placeholder="Playwright, Firebase, Context7..."></div></div>
+        <div class="mcp-catalog-heading"><div><p class="mcp-step-label">Step 1 · Choose</p><h3 id="mcp-catalog-heading">Find a server</h3><p class="field-note">Browse the supplied list or add a custom server below. Catalog entries are starting points, not preconfigured connections.</p></div><div class="step-field"><label for="mcp-catalog-search">Search servers</label><input id="mcp-catalog-search" type="search" autocomplete="off" placeholder="Search by name…"></div></div>
         <p id="mcp-catalog-count" class="field-note" role="status">Loading catalog...</p>
         <div id="mcp-catalog-results" class="mcp-catalog-results"></div>
         <button id="mcp-catalog-more" class="secondary-button" type="button" hidden>Show more servers</button>
       </section>
       <form id="mcp-form">
+        <div class="mcp-config-intro"><div><p class="mcp-step-label">Step 2 · Connect</p><h3>Your connections</h3><p class="field-note">Use the server's official instructions for its URL or launch command. Nothing is installed or tested when you save.</p></div><span id="mcp-shared-count" class="mcp-count">0 shared</span></div>
         <div id="mcp-tools"></div>
         <p id="mcp-error" class="form-error" role="alert"></p>
         <p id="mcp-status" class="field-note" role="status">Loading configuration...</p>
-        <div class="workflow-actions"><button class="secondary-button" id="cancel-mcps" type="button">Cancel changes</button><button class="dispatch-button compact-button" id="save-mcps" type="submit" disabled>Save MCP configuration</button></div>
+        <div class="mcp-save-bar"><div><p class="mcp-step-label">Step 3 · Finish</p><strong>Ready to use in future runs?</strong><span>Saving shares these settings with every workspace.</span></div><div class="workflow-actions"><button class="secondary-button" id="cancel-mcps" type="button">Discard changes</button><button class="dispatch-button compact-button" id="save-mcps" type="submit" disabled>Save connections</button></div></div>
       </form>
       <section class="mcp-export" aria-labelledby="mcp-export-heading">
         <div><h3 id="mcp-export-heading">Use these servers in another CLI</h3><p class="field-note">Export saved settings as a secret-free fragment to merge into the tool's native configuration. Codex and OpenCode exports include their overrides; Claude Code and Cursor use shared servers only. Exporting never changes files.</p></div>
@@ -486,17 +603,49 @@
     <aside id="run-drawer" class="run-drawer" aria-label="Run details" aria-hidden="true">
       <header class="run-drawer-header"><div class="run-drawer-heading"><span>Run details</span><small id="run-stream-status" role="status" aria-live="polite"></small></div><button id="run-drawer-close" class="dialog-close" type="button" aria-label="Close run details">Close</button></header>
       <div id="run-detail"></div>
+      <section class="run-followup" aria-labelledby="run-followup-heading">
+        <h3 id="run-followup-heading">Follow up on this run</h3>
+        <p id="run-followup-note" class="field-note"></p>
+        <form id="run-followup-form">
+          <label for="run-followup-message">What should happen next?</label>
+          <textarea id="run-followup-message" name="message" rows="3" required minlength="10" maxlength="12000" placeholder="Also add tests for the empty state." aria-describedby="run-followup-note run-followup-error"></textarea>
+          <label class="host-confirm"><input id="run-followup-allow-host" type="checkbox" required><span><b>Allow commands on this machine</b><small>Worktrees isolate files, not processes. Use trusted tasks only.</small></span></label>
+          <p id="run-followup-error" class="form-error" role="alert"></p>
+          <p id="run-followup-status" class="field-note" role="status"></p>
+          <button class="dispatch-button compact-button" type="submit">Send follow-up</button>
+        </form>
+      </section>
+    </aside>
+    <aside id="inline-agent" class="inline-agent" aria-labelledby="inline-agent-title" aria-hidden="true">
+      <header class="inline-agent-header"><div><span>Workspace agent</span><h2 id="inline-agent-title" tabindex="-1">Ask about this view</h2></div><button id="inline-agent-close" type="button" aria-label="Close workspace agent">Close</button></header>
+      <div class="inline-agent-context"><span id="inline-agent-surface">FILES</span><b id="inline-agent-context-title">Workspace context</b><code id="inline-agent-context-detail"></code><small>Context is captured when opened. Inspected files and recent messages are shared with the selected AI provider. History lasts until page reload.</small></div>
+      <div class="inline-agent-mode" role="group" aria-label="Agent mode"><button type="button" data-inline-agent-mode="ask" aria-pressed="true">Ask</button><button type="button" data-inline-agent-mode="edit" aria-pressed="false">Edit</button></div>
+      <ol id="inline-agent-messages" class="inline-agent-messages" aria-label="Agent conversation"></ol>
+      <div id="inline-agent-empty" class="inline-agent-empty"><b>Work without leaving the diff</b><span>Ask a question, explain selected code, or switch to Edit to make a scoped change.</span></div>
+      <form id="inline-agent-form" class="inline-agent-form">
+        <label for="inline-agent-input">Message</label>
+        <textarea id="inline-agent-input" rows="4" maxlength="12000" required placeholder="Ask about the selected file or commit…" aria-describedby="inline-agent-note inline-agent-error"></textarea>
+        <label id="inline-agent-confirm-wrap" class="inline-agent-confirm" hidden><input id="inline-agent-confirm" type="checkbox"><span>Allow the agent to edit files in this checkout. Review Git changes afterward.</span></label>
+        <div class="inline-agent-controls"><label for="inline-agent-tool">Tool</label><select id="inline-agent-tool"><option value="">Loading tools</option></select><button id="inline-agent-send" type="submit">Send</button></div>
+        <p id="inline-agent-note" role="status" aria-live="polite">Ask mode is read-only.</p><p id="inline-agent-error" role="alert"></p>
+      </form>
     </aside>
     <script src="/assets/theme-controls.js" defer></script>
     <script src="/assets/pane-resize.js" defer></script>
     <script src="/assets/run-details.js" defer></script>
     <script src="/assets/app.js" defer></script>
     <script src="/assets/workspaces.js" defer></script>
+    <script src="/assets/files-syntax.js" defer></script>
+    <script src="/assets/files-git.js" defer></script>
+    <script src="/assets/files.js" defer></script>
     <script src="/assets/command-console.js" defer></script>
     <script src="/assets/chat.js" defer></script>
     <script src="/assets/chat-import.js" defer></script>
     <script src="/assets/git-diff.js" defer></script>
+    <script src="/assets/pull-requests.js" defer></script>
     <script src="/assets/git-view.js" defer></script>
     <script src="/assets/worktrees.js" defer></script>
+    <script src="/assets/agent-markdown.js" defer></script>
+    <script src="/assets/inline-agent.js" defer></script>
   </body>
 </html>

@@ -44,9 +44,12 @@ class Plan(StrictModel):
         return self
 
     def dependency_order(self) -> list[Ticket]:
+        return [ticket for batch in self.dependency_batches() for ticket in batch]
+
+    def dependency_batches(self) -> list[list[Ticket]]:
         pending = {ticket.id: ticket for ticket in self.tickets}
         completed: set[str] = set()
-        ordered: list[Ticket] = []
+        batches: list[list[Ticket]] = []
         while pending:
             ready = sorted(
                 (ticket for ticket in pending.values() if set(ticket.dependencies) <= completed),
@@ -54,11 +57,11 @@ class Plan(StrictModel):
             )
             if not ready:
                 raise ValueError("Ticket dependency graph contains a cycle")
+            batches.append(ready)
             for ticket in ready:
-                ordered.append(ticket)
                 completed.add(ticket.id)
                 pending.pop(ticket.id)
-        return ordered
+        return batches
 
 
 class ExecutionRequest(StrictModel):

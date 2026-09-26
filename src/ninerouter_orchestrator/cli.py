@@ -107,6 +107,15 @@ def ui() -> None:
 def run(
     request: str,
     repository: Annotated[Path, typer.Option("--repo", exists=True, file_okay=False)],
+    parallel_tickets: Annotated[
+        int | None,
+        typer.Option(
+            "--parallel-tickets",
+            min=1,
+            max=8,
+            help="Maximum independent ticket subagents to run at once (default: 1).",
+        ),
+    ] = None,
     allow_host_execution: Annotated[
         bool,
         typer.Option(
@@ -115,13 +124,14 @@ def run(
     ] = False,
 ) -> None:
     """Execute a trusted task on a separate integration branch; never push or merge to main."""
+    overrides = {"max_parallel_tickets": parallel_tickets} if parallel_tickets is not None else {}
     orchestrator = EngineeringOrchestrator(
-        repository, Settings(allow_host_execution=allow_host_execution),
+        repository, Settings(allow_host_execution=allow_host_execution, **overrides),
         mcp_config=McpConfigStore().get(),
     )
     result = orchestrator.run(request)
     typer.echo(json.dumps(result, indent=2))
-    if result["status"] != "approved":
+    if result["status"] not in {"completed", "approved"}:
         raise typer.Exit(1)
 
 

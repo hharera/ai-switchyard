@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 import tempfile
-from pathlib import Path
+from datetime import date
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from .process import ProcessError
@@ -41,7 +43,77 @@ GitAction = Literal[
 MAX_PREVIEW_BYTES = 256_000
 MAX_PATCH_LINES = 4_000
 MAX_FILES = 500
+MAX_LOG_COMMITS = 100
+MAX_REPOSITORIES = 50
+MAX_REPOSITORY_DEPTH = 6
 DIFF_OPTIONS = ("--no-color", "--no-ext-diff", "--no-textconv", "--find-renames")
+REPOSITORY_SCAN_SKIPS = {
+    ".cache",
+    ".idea",
+    ".next",
+    ".pytest_cache",
+    ".tox",
+    ".venv",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+}
+
+
+def discover_repositories(workspace: Path) -> list[dict]:
+    """Find independent repositories without walking generated dependency trees."""
+    root = workspace.expanduser().resolve()
+    if not root.is_dir():
+        raise ProcessError("Choose an existing workspace folder.")
+    repositories: list[dict] = []
+    pending = [(root, 0, None)]
+    visited = 0
+    while pending and len(repositories) < MAX_REPOSITORIES and visited < 20_000:
+        folder, depth, repository_root = pending.pop()
+        visited += 1
+        marker = folder / ".git"
+        if marker.is_dir() or marker.is_file():
+            repository_root = folder
+            relative = folder.relative_to(root).as_posix() or "."
+            repositories.append(
+                {
+                    "path": str(folder),
+                    "relative_path": relative,
+                    "name": root.name if relative == "." else folder.name,
+                }
+            )
+        if depth >= MAX_REPOSITORY_DEPTH:
+            continue
+        try:
+            children = [entry for entry in folder.iterdir() if entry.is_dir() and not entry.is_symlink()]
+        except OSError:
+            continue
+        ignored = set()
+        if repository_root and children:
+            # Git handles nested ignore files, negations, and tracked submodules.
+            candidates = [child.relative_to(repository_root).as_posix() for child in children]
+            try:
+                result = subprocess.run(
+                    ["git", "check-ignore", "--stdin", "-z"], cwd=repository_root,
+                    input="\0".join(candidates) + "\0", text=True,
+                    capture_output=True, timeout=5, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ProcessError("Unable to check repository discovery ignore rules.") from exc
+            if result.returncode not in (0, 1):
+                continue
+            ignored = set(result.stdout.split("\0"))
+        for child in sorted(children, key=lambda item: item.name.casefold(), reverse=True):
+            if child.name == ".git" or child.name in REPOSITORY_SCAN_SKIPS:
+                continue
+            if repository_root and child.relative_to(repository_root).as_posix() in ignored:
+                continue
+            pending.append((child, depth + 1, repository_root))
+    repositories.sort(key=lambda item: (item["relative_path"] != ".", item["relative_path"]))
+    return repositories
 
 
 class GitReview:
@@ -160,9 +232,137 @@ class GitReview:
             )
         return result
 
+    def branch_refs(self) -> list[dict]:
+        output = self.output(
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname)%00%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track)%00%(HEAD)%00%(symref)",
+            "refs/heads",
+            "refs/remotes",
+        )
+        refs = []
+        for line in output.splitlines():
+            parts = line.split("\0", 6)
+            if len(parts) != 7 or parts[6]:
+                continue
+            full_name, short_name, commit, upstream, tracking, head, _ = parts
+            kind = "local" if full_name.startswith("refs/heads/") else "remote"
+            short_name = full_name.removeprefix(
+                "refs/heads/" if kind == "local" else "refs/remotes/"
+            )
+            refs.append(
+                {
+                    "full_name": full_name,
+                    "name": short_name,
+                    "commit": commit,
+                    "upstream": upstream,
+                    "tracking": tracking.strip("[]"),
+                    "current": head == "*",
+                    "kind": kind,
+                }
+            )
+        return refs[:500]
+
+    def commit_log(
+        self, ref: str | None = None, *, query: str = "", author: str = "",
+        since: str = "", until: str = "", path: str = "",
+    ) -> list[dict]:
+        for value in (since, until):
+            if value:
+                date.fromisoformat(value)
+        if since and until and since > until:
+            raise ProcessError("The start date must be on or before the end date.")
+        if path and ("\0" in path or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts):
+            raise ProcessError("Enter a repository-relative file or folder path.")
+        if not self.output("rev-parse", "--verify", "HEAD", check=False):
+            return []
+        revisions = [self.revision(ref)] if ref else ["--all", "HEAD"]
+        filters = []
+        if query:
+            if re.fullmatch(r"[a-fA-F0-9]{4,64}", query):
+                # Hash search targets a single commit, rather than its ancestors.
+                target = self.revision(query)
+                filters.append("--no-walk")
+                if ref and self.output("merge-base", target, revisions[0], check=False) != target:
+                    return []
+                revisions = [target]
+            else:
+                filters.extend(["--fixed-strings", "--regexp-ignore-case", f"--grep={query}"])
+        if author:
+            filters.extend(["--fixed-strings", "--regexp-ignore-case", f"--author={author}"])
+        if since:
+            filters.append(f"--since-as-filter={since}T00:00:00")
+        if until:
+            filters.append(f"--until={until}T23:59:59")
+        output = self.git(
+            "log",
+            *revisions,
+            "--date-order",
+            "--topo-order",
+            f"--max-count={MAX_LOG_COMMITS}",
+            *filters,
+            "--format=%x1e%H%x1f%h%x1f%s%x1f%an%x1f%aI%x1f%D%x1f%P",
+            "--", *([path] if path else []),
+        )[0]
+        commits = []
+        for record in output.split("\x1e"):
+            if not record:
+                continue
+            parts = record.strip("\r\n").split("\x1f", 6)
+            if len(parts) != 7:
+                continue
+            commits.append(
+                {
+                    "hash": parts[0],
+                    "short": parts[1],
+                    "subject": parts[2],
+                    "author": parts[3],
+                    "authored_at": parts[4],
+                    "decorations": parts[5],
+                    "parents": parts[6].split() if parts[6] else [],
+                }
+            )
+        return commits
+
+    def commit_detail(self, ref: str) -> dict:
+        commit = self.revision(ref)
+        fields = self.git(
+            "show", "-s", "--format=%H%x00%an%x00%ae%x00%aI%x00%cn%x00%cI%x00%P%x00%B", commit,
+            limit=MAX_PREVIEW_BYTES,
+        )[0].split("\0", 7)
+        parents = fields[6].split()
+        base = parents[0] if parents else self.output("hash-object", "-t", "tree", "--stdin")
+        files = self.files([base, commit], "branch", [])
+        return {
+            "hash": commit, "author": fields[1], "author_email": fields[2],
+            "authored_at": fields[3], "committer": fields[4], "committed_at": fields[5],
+            "parents": parents, "message": fields[7].rstrip("\n"), "base": base,
+            "comparison_label": "First parent" if parents else "Empty tree (initial commit)",
+            "files": files[:MAX_FILES], "files_truncated": len(files) > MAX_FILES,
+            "file_count": len(files), "repository": str(self.root),
+        }
+
+    def commit_patch(self, ref: str, path: str) -> dict:
+        detail = self.commit_detail(ref)
+        file = next((item for item in detail["files"] if item["path"] == path), None)
+        if file is None:
+            raise ProcessError("Choose a changed file from this commit.")
+        paths = [file["old_path"], path] if file["old_path"] else [path]
+        patch, truncated = self.git(
+            "diff", *DIFF_OPTIONS, "--unified=3", detail["base"], detail["hash"],
+            "--", *paths, limit=MAX_PREVIEW_BYTES,
+        )
+        lines = patch.split("\n")
+        return {**file, "patch": "\n".join(lines[:MAX_PATCH_LINES]),
+                "truncated": truncated or len(lines) > MAX_PATCH_LINES}
+
     def working_files(self) -> list[dict]:
+        # Let Git apply scoped ignore rules and negations before collecting output.
+        # Tracked files remain visible even when they match an ignore pattern.
         tokens = iter(
-            self.git("status", "--porcelain=v1", "-z", "--untracked-files=all")[0].split("\0")
+            self.git(
+                "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no"
+            )[0].split("\0")
         )
         files = []
         for entry in tokens:
@@ -321,22 +521,7 @@ class GitReview:
             parts = line.split("\0", 2)
             if len(parts) == 3:
                 stashes.append({"ref": parts[0], "message": parts[1], "age": parts[2]})
-        recent_commits = []
-        if head:
-            for line in self.output(
-                "log", "-15", "--format=%h%x00%s%x00%an%x00%aI%x00%D", check=False
-            ).splitlines():
-                parts = line.split("\0", 4)
-                if len(parts) == 5:
-                    recent_commits.append(
-                        {
-                            "short": parts[0],
-                            "subject": parts[1],
-                            "author": parts[2],
-                            "authored_at": parts[3],
-                            "decorations": parts[4],
-                        }
-                    )
+        commit_log = self.commit_log() if head else []
         return {
             "repository": str(self.root),
             "name": self.root.name,
@@ -351,7 +536,8 @@ class GitReview:
             "local_branches": local_branches[:500],
             "remotes": remotes,
             "stashes": stashes[:50],
-            "recent_commits": recent_commits,
+            "recent_commits": commit_log[:15],
+            "commit_log": commit_log,
             "operation": self.operation_state(),
             "default_base": default_base,
             "comparison": info,
@@ -376,6 +562,7 @@ class GitReview:
         action: GitAction,
         *,
         paths: list[str] | None = None,
+        recursive_paths: list[str] | None = None,
         message: str = "",
         branch: str = "",
         start_point: str = "",
@@ -387,13 +574,20 @@ class GitReview:
         amend: bool = False,
         reset_mode: Literal["soft", "mixed", "hard"] = "mixed",
     ) -> dict:
-        selected = list(dict.fromkeys(paths or []))
+        requested = list(dict.fromkeys(paths or []))
+        recursive = list(dict.fromkeys(recursive_paths or []))
         output = ""
         if action == "stage":
-            self.known_paths(selected)
+            files = self.known_paths(requested, recursive)
+            selected = [
+                item["path"] for item in files
+                if item["unstaged"] or item["status"] in {"untracked", "conflicted"}
+            ]
+            if not selected:
+                raise ProcessError("Select at least one file with unstaged changes.")
             output = self.run("add", "--", *selected)
         elif action == "unstage":
-            files = self.known_paths(selected)
+            files = self.known_paths(requested, recursive)
             targets = []
             for item in files:
                 if item["staged"]:
@@ -407,20 +601,26 @@ class GitReview:
             else:
                 output = self.run("rm", "--cached", "-r", "--ignore-unmatch", "--", *targets)
         elif action == "discard":
-            files = self.known_paths(selected)
-            if any(item["status"] == "untracked" for item in files):
+            files = self.known_paths(requested, recursive)
+            if not recursive and any(item["status"] == "untracked" for item in files):
                 raise ProcessError("Use Delete untracked for files that are not tracked by Git.")
-            if any(item["status"] == "conflicted" for item in files):
+            if not recursive and any(item["status"] == "conflicted" for item in files):
                 raise ProcessError("Resolve conflicted files before discarding their changes.")
-            targets = [item["path"] for item in files if item["unstaged"]]
+            targets = [
+                item["path"] for item in files
+                if item["unstaged"] and item["status"] not in {"untracked", "conflicted"}
+            ]
             if not targets:
                 raise ProcessError("Select at least one file with unstaged changes.")
             output = self.run("restore", "--worktree", "--", *targets)
         elif action == "delete_untracked":
-            files = self.known_paths(selected)
-            if not files or any(item["status"] != "untracked" for item in files):
+            files = self.known_paths(requested, recursive)
+            if not recursive and (not files or any(item["status"] != "untracked" for item in files)):
                 raise ProcessError("Select only untracked files to delete.")
-            output = self.run("clean", "-f", "-d", "--", *(item["path"] for item in files))
+            targets = [item["path"] for item in files if item["status"] == "untracked"]
+            if not targets:
+                raise ProcessError("Select at least one untracked file to delete.")
+            output = self.run("clean", "-f", "-d", "--", *targets)
         elif action == "commit":
             commit_message = message.strip()
             if not commit_message:
@@ -452,11 +652,11 @@ class GitReview:
             target = self.revision(ref.strip())
             output = self.run("reset", f"--{reset_mode}", target)
         elif action in {"resolve_ours", "resolve_theirs"}:
-            files = self.known_paths(selected)
+            files = self.known_paths(requested, recursive)
             if any(item["status"] != "conflicted" for item in files):
                 raise ProcessError("Select only conflicted files.")
             side = "--ours" if action == "resolve_ours" else "--theirs"
-            output = self.run("checkout", side, "--", *selected)
+            output = self.run("checkout", side, "--", *(item["path"] for item in files))
         elif action == "fetch":
             args = ["fetch", "--prune"]
             if remote:
@@ -522,13 +722,40 @@ class GitReview:
             raise ProcessError("Enter a valid branch name that does not start with a dash.")
         self.run("check-ref-format", f"refs/heads/{name}")
 
-    def known_paths(self, paths: list[str]) -> list[dict]:
-        if not paths:
+    def known_paths(
+        self, paths: list[str], recursive_paths: list[str] | None = None
+    ) -> list[dict]:
+        scopes = recursive_paths or []
+        if not paths and not scopes:
             raise ProcessError("Select at least one changed file.")
-        working = {item["path"]: item for item in self.working_files()}
+        working_files = self.working_files()
+        working = {item["path"]: item for item in working_files}
         if any("\0" in path or path not in working for path in paths):
             raise ProcessError("One or more selected files are no longer changed. Refresh and try again.")
-        return [working[path] for path in paths]
+        selected = [working[path] for path in paths]
+        for scope in scopes:
+            candidate = PurePosixPath(scope)
+            if (
+                not scope
+                or "\0" in scope
+                or candidate.is_absolute()
+                or ".." in candidate.parts
+                or ".git" in candidate.parts
+                or candidate.as_posix() != scope.rstrip("/")
+            ):
+                raise ProcessError("Choose a folder inside the repository.")
+            prefix = f"{candidate.as_posix()}/"
+            matches = [
+                item for item in working_files
+                if scope == "." or item["path"].startswith(prefix)
+                or bool(item["old_path"] and item["old_path"].startswith(prefix))
+            ]
+            if not matches:
+                raise ProcessError(
+                    "This folder no longer contains changed files. Refresh and try again."
+                )
+            selected.extend(matches)
+        return list({item["path"]: item for item in selected}.values())
 
     def local_branches(self) -> list[str]:
         return self.output("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()

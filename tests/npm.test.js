@@ -17,6 +17,10 @@ test("npm tarball contains runtime files, not caches or secrets", () => {
   const [manifest] = JSON.parse(result.stdout);
   const npmPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.equal(manifest.name, npmPackage.name);
+  assert.deepEqual(npmPackage.bin, {
+    openswitch: "bin/switchyard.js",
+    switchyard: "bin/switchyard.js",
+  });
   const paths = manifest.files.map((file) => file.path);
   for (const required of ["bin/switchyard.js", "scripts/install-python.js", "scripts/python-runtime.js", "pyproject.toml",
     "src/ninerouter_orchestrator/cli.py", "src/ninerouter_orchestrator/adapters/codex.py",
@@ -26,6 +30,13 @@ test("npm tarball contains runtime files, not caches or secrets", () => {
   assert.ok(paths.every((path) => !/(?:__pycache__|\.pyc$|(^|\/)\.env$|\.venv|node_modules|^tests\/)/.test(path)));
   const pythonMetadata = readFileSync(join(root, "pyproject.toml"), "utf8");
   assert.ok(pythonMetadata.includes(`version = "${npmPackage.version}"`));
+});
+
+test("installer announces the command that opens Switchyard", () => {
+  const installer = readFileSync(join(root, "scripts", "install-python.js"), "utf8");
+  assert.match(installer, /Run `openswitch ui` to open the web interface/);
+  assert.match(installer, /CONOUT\$/);
+  assert.match(installer, /\/dev\/tty/);
 });
 
 test("missing Python runtime produces an actionable error", () => {
